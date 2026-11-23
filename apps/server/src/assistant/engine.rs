@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::agui::{self, Emitter};
+use super::cards::{self, Names};
 use super::model::{
     Block, Delta, Message, ModelProvider, ModelRequest, ProviderError, Role, StopReason, Usage,
 };
@@ -32,6 +33,12 @@ use super::store::{ConversationState, Pending, TurnState};
 /// Runs a tool as the signed-in user (the MCP tools in-process, `crate::mcp::TaskTools`).
 pub(crate) trait ToolRunner: Send + Sync {
     fn call<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>>;
+
+    /// A read the server makes for itself (names and current values for the cards, `cards.rs`), as the same user.
+    /// It is not a step of the conversation and the model does not see it.
+    fn lookup<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        self.call(name, input)
+    }
 }
 
 /// What a run needs from the database, behind a trait so the loop can be tested on its own.
@@ -152,6 +159,8 @@ pub(crate) struct Engine<'a, P, T, H> {
     pub limits: Limits,
     /// The panel's Follow along switch for this run: whether the pages Ask AI opens are shown to the user.
     pub follow_along: bool,
+    /// Names for the cards, looked up once per run.
+    pub names: Names,
 }
 
 impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
@@ -446,6 +455,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                     }]));
                     continue;
                 }
+                self.summarize(state, &message_id).await;
                 return self.finish().await;
             }
             let truncated = turn.stop == StopReason::MaxTokens;
@@ -621,12 +631,20 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
     ) {
         let expires_at = TimestampMillis::now().as_millis() + self.limits.approval_ttl_ms;
         let interrupt_id = format!("approve:{id}");
+        let mut metadata = json!({"tool": name, "risk": risk, "allowForConversation": risk == Risk::Write && !self.free_text(&name)});
+        // what the change does, from the server's own reading of the item now (kept with the interrupt, so a reload
+        // shows the same card)
+        if let Some(preview) =
+            cards::approval_preview(&self.names, self.tools, &name, &input, self.workspace_id).await
+        {
+            metadata["preview"] = preview;
+        }
         let interrupt = agui::approval_interrupt(
             &interrupt_id,
             &id,
             &approval_message(&name, &input),
             &iso_time(expires_at),
-            json!({"tool": name, "risk": risk, "allowForConversation": risk == Risk::Write && !self.free_text(&name)}),
+            metadata,
         );
         state.pending = Some(Pending {
             interrupt_id,
@@ -717,7 +735,19 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 }
             }
             _ => match self.tools.call(name, input.clone()).await {
-                Ok(value) => {
+                Ok(mut value) => {
+                    let card = cards::read_card(
+                        &self.names,
+                        self.tools,
+                        name,
+                        &mut value,
+                        self.workspace_id,
+                    )
+                    .await;
+                    let mut result = success(nonce, name, &value);
+                    if value.get("totals").is_some() && name == "list_tasks" {
+                        result = with_note(result, TOTALS_NOTE);
+                    }
                     let page = self.registry.get(name).map(|def| def.label);
                     if let Some(label) = page
                         && label.shows
@@ -725,9 +755,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                             registry::page_url(label.page, &input, &value, self.workspace_id)
                     {
                         let note = self.navigate(state, message_id, &url).await;
-                        return with_note(success(nonce, name, &value), &note);
+                        result = with_note(result, &note);
                     }
-                    success(nonce, name, &value)
+                    with_card(result, card)
                 }
                 Err(error) => CallResult::error(prompt::wrap_untrusted(nonce, name, &error)),
             },
@@ -767,15 +797,28 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             Ok(value) => {
                 state.turn.wrote = true;
                 self.hooks.audit_change(name, "applied").await;
-                if carded
-                    && let Some(label) = self.registry.get(name).map(|def| def.label)
-                    && let Some(url) =
+                let card =
+                    cards::change_card(&self.names, self.tools, name, &value, self.workspace_id)
+                        .await;
+                let url = self
+                    .registry
+                    .get(name)
+                    .map(|def| def.label)
+                    .and_then(|label| {
                         registry::page_url(label.page, &input, &value, self.workspace_id)
-                {
+                    });
+                state.turn.changes.push(cards::change_entry(
+                    name,
+                    &input,
+                    card.as_ref(),
+                    url.clone(),
+                ));
+                let mut result = success(nonce, name, &value);
+                if carded && let Some(url) = url {
                     let note = self.navigate(state, message_id, &url).await;
-                    return with_note(success(nonce, name, &value), &note);
+                    result = with_note(result, &note);
                 }
-                success(nonce, name, &value)
+                with_card(result, card)
             }
             Err(error) => {
                 self.hooks.audit_change(name, "failed").await;
@@ -839,6 +882,19 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         state.display.push(message);
     }
 
+    /// The card that ends a message which made changes: one line and link per change.
+    async fn summarize(&self, state: &mut ConversationState, message_id: &str) {
+        if state.turn.changes.is_empty() {
+            return;
+        }
+        let id = format!("summary-{}", Id::new_v7());
+        self.announce(state, message_id, &id, cards::SUMMARY_TOOL, &json!({}))
+            .await;
+        let content = json!({"card": cards::summary_card(&state.turn.changes)}).to_string();
+        self.out.tool_result(&id, &content).await;
+        state.display.push(agui::tool_message(&id, &content));
+    }
+
     async fn finish(&self) -> Outcome {
         self.out
             .run_finished(self.thread_id, self.run_id, None)
@@ -883,6 +939,17 @@ fn page_note(follow_along: bool, url: &str) -> String {
             "Not opened: Follow along is off (the user's choice, not an error), so their page stays where it is. A 'go there' link to {path} is shown to them: say the page is ready behind that link. Do not say you opened it, and do not call it a failure."
         )
     }
+}
+
+const TOTALS_NOTE: &str = "`totals` holds exact counts of this result, worked out by Orbit; quote them and do not count \
+the items yourself. If `complete` is false, more tasks match: say the counts cover this page only.";
+
+/// The panel's view of a result, with its card (built by the server from the result) when it has one.
+fn with_card(mut result: CallResult, card: Option<Value>) -> CallResult {
+    if let Some(card) = card {
+        result.client = cards::attach(&result.client, card);
+    }
+    result
 }
 
 /// A note from Orbit itself after the (untrusted) tool output.

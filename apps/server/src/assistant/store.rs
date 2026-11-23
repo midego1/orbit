@@ -56,6 +56,9 @@ pub(crate) struct TurnState {
     /// A change ran without an approval card in this message: no page opens until the next message.
     #[serde(default)]
     pub no_follow: bool,
+    /// The changes made for this message (`cards::change_entry`), for the summary card at its end.
+    #[serde(default)]
+    pub changes: Vec<Value>,
 }
 
 /// A tool call waiting for the user's approval, and the rest of its model turn.

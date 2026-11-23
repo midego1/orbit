@@ -335,6 +335,7 @@ impl Harness {
             cancel,
             limits: self.limits,
             follow_along: self.follow_along,
+            names: super::cards::Names::default(),
         };
         let outcome = engine.run(state, input).await;
         drop(engine);
@@ -1520,6 +1521,7 @@ async fn an_approval_is_used_up_and_saved_before_its_write_runs() {
         cancel: CancellationToken::new(),
         limits: harness.limits,
         follow_along: true,
+        names: super::cards::Names::default(),
     };
     engine
         .run(

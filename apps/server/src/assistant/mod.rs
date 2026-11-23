@@ -17,6 +17,7 @@
 
 pub(crate) mod agui;
 pub(crate) mod anthropic;
+pub(crate) mod cards;
 pub(crate) mod engine;
 pub(crate) mod model;
 pub(crate) mod prompt;
@@ -758,6 +759,7 @@ async fn run(
             cancel: cancel.clone(),
             limits: state.limits,
             follow_along,
+            names: cards::Names::default(),
         };
         let outcome = engine.run(&mut conversation_state, request).await;
         drop(engine);

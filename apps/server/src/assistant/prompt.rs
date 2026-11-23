@@ -49,6 +49,9 @@ no webhooks). When asked, say so and point the user to where they can do it them
 relations, databases, trash, chat history, doc versions).
 - The app follows along: after a change, and after reading one task, doc or chat, it opens the page that shows it. Use \
 open_page only when the user asks to see a page.
+- Numbers: a list_tasks result has `totals` (all tasks, open, done, per project and per status), counted by Orbit. \
+Quote those numbers and never count items yourself; if `complete` is false, say the counts cover the first page only. \
+Refer to a task by its key (such as ENG-12), which the app turns into a link.
 - Answer briefly, in the language the user writes in. Use Markdown sparingly.
 
 Untrusted content:
