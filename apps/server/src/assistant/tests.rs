@@ -2605,3 +2605,199 @@ async fn the_totals_of_a_task_list_count_every_page_in_the_database() {
             .is_err()
     );
 }
+
+/// The count of each (project, status) when paging through `tasks()` two at a time.
+async fn paged_counts(
+    repository: &crate::repositories::tasks::TaskRepository,
+    workspace: Id,
+    actor: Id,
+    filter: &crate::repositories::tasks::TaskFilter,
+) -> std::collections::BTreeMap<(String, String), i64> {
+    let mut counts = std::collections::BTreeMap::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = repository
+            .tasks(
+                workspace,
+                actor,
+                filter,
+                cursor.as_deref(),
+                2,
+                TimestampMillis::now(),
+            )
+            .await
+            .unwrap();
+        for task in page.items {
+            *counts
+                .entry((task.project_id.to_string(), task.status_id.to_string()))
+                .or_default() += 1;
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return counts,
+        }
+    }
+}
+
+#[tokio::test]
+async fn task_counts_match_paging_through_the_same_filter() {
+    use crate::mcp::TaskTools;
+    use crate::repositories::api_tokens::{ApiTokenPrincipal, ApiTokenScope};
+    use crate::repositories::task_filter::{ShowCompleted, SubIssuesDisplay};
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::{TaskQuery, TokenApi};
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let repository = Arc::new(TaskRepository::new(database.clone()));
+    let tools_for = |principal| super::SessionTools {
+        tools: TaskTools::in_process(TokenApi::new(repository.clone()), super::REQUEST_ID),
+        principal,
+    };
+    let owner = || super::principal(&database, w.workspace, Id::new_v7(), w.owner);
+    // projects first; the next principal approves them
+    let setup = tools_for(owner().await.unwrap());
+    let mut projects = vec![w.project.to_string()];
+    for (name, key) in [("Second", "SEC"), ("Third", "THR"), ("Fourth", "FOU")] {
+        let project = setup
+            .call("create_project", json!({"name": name, "key": key}))
+            .await
+            .unwrap();
+        projects.push(project["id"].as_str().unwrap().to_owned());
+    }
+    let tools = tools_for(owner().await.unwrap());
+    let status = |project: String, category: &'static str| {
+        let tools = &tools;
+        async move {
+            let list = tools
+                .call("list_task_statuses", json!({"project_id": project}))
+                .await
+                .unwrap();
+            list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|status| status["category"] == category)
+                .map(|status| status["id"].as_str().unwrap().to_owned())
+                .unwrap()
+        }
+    };
+    let create = |project: &str, status: &str, title: &str, parent: Option<&str>| {
+        let mut input = json!({"project_id": project, "status_id": status, "title": title});
+        if let Some(parent) = parent {
+            input["parent_task_id"] = json!(parent);
+        }
+        let tools = &tools;
+        async move {
+            tools.call("create_task", input).await.unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let (general, second, third, fourth) = (&projects[0], &projects[1], &projects[2], &projects[3]);
+    let (open, done) = (
+        status(general.clone(), "unstarted").await,
+        status(general.clone(), "completed").await,
+    );
+    for n in 0..3 {
+        create(general, &open, &format!("Parity open {n}"), None).await;
+    }
+    create(general, &done, "Parity done", None).await;
+    let parent = create(general, &open, "Parity parent", None).await;
+    create(general, &open, "Parity sub 1", Some(&parent)).await;
+    create(general, &done, "Parity sub 2", Some(&parent)).await;
+    let gone = create(general, &open, "Parity deleted", None).await;
+    for (project, n) in [(second, 2), (third, 2), (fourth, 2)] {
+        let status = status(project.clone(), "unstarted").await;
+        for i in 0..n {
+            create(project, &status, &format!("Parity {project} {i}"), None).await;
+        }
+    }
+    // a task in the trash and a project in the trash
+    let now = TimestampMillis::now().as_millis();
+    sqlx::query("UPDATE tasks SET deleted_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(&gone)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE projects SET deleted_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(third)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    let full = owner().await.unwrap();
+    let mut restricted = full.clone();
+    restricted.all_projects = false;
+    restricted.project_ids = vec![general.parse().unwrap(), second.parse().unwrap()];
+    let api = TokenApi::new(repository.clone());
+    let parent_id: Id = parent.parse().unwrap();
+    let queries: Vec<(&str, &ApiTokenPrincipal, Box<dyn Fn() -> TaskQuery>)> = vec![
+        ("all", &full, Box::new(TaskQuery::default)),
+        (
+            "text",
+            &full,
+            Box::new(|| TaskQuery {
+                query: Some("Parity".into()),
+                ..TaskQuery::default()
+            }),
+        ),
+        (
+            "parent",
+            &full,
+            Box::new(move || TaskQuery {
+                parent_task_id: Some(parent_id),
+                ..TaskQuery::default()
+            }),
+        ),
+        (
+            "restricted token",
+            &restricted,
+            Box::new(TaskQuery::default),
+        ),
+    ];
+    let mut sums = Vec::new();
+    for (name, principal, query) in &queries {
+        let scoped = api
+            .authorize(principal, ApiTokenScope::TasksRead, "test")
+            .await
+            .unwrap();
+        let mut filter = scoped.task_filter(query()).await.unwrap();
+        let mut counted = std::collections::BTreeMap::new();
+        for (project, status, count) in scoped.task_counts(query()).await.unwrap() {
+            counted.insert((project.to_string(), status.to_string()), count);
+        }
+        assert_eq!(
+            counted,
+            paged_counts(&repository, w.workspace, w.owner, &filter).await,
+            "{name}"
+        );
+        sums.push(counted.values().sum::<i64>());
+        // the same with hidden sub-issues and no completed tasks, straight on the repository
+        filter.sub_issues = SubIssuesDisplay::Hidden;
+        filter.show_completed = ShowCompleted::None;
+        let mut counted = std::collections::BTreeMap::new();
+        for (project, status, count) in repository
+            .task_counts(w.workspace, w.owner, &filter, TimestampMillis::now())
+            .await
+            .unwrap()
+        {
+            counted.insert((project.to_string(), status.to_string()), count);
+        }
+        assert_eq!(
+            counted,
+            paged_counts(&repository, w.workspace, w.owner, &filter).await,
+            "{name}, hidden sub-issues"
+        );
+    }
+    // "Parity" tasks: General 7 live (the deleted one is out), Second 2, Fourth 2; Third is in the trash
+    assert_eq!(sums[1], 11);
+    assert_eq!(sums[2], 2, "the parent's two sub-issues");
+    assert_eq!(
+        sums[3],
+        sums[0] - 2,
+        "the restricted token does not count Fourth"
+    );
+}

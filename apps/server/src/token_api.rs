@@ -1066,7 +1066,7 @@ impl Authorized<'_> {
 
     /// The filter of a task list (`list_tasks`, `task_counts`): the query's conditions within the
     /// token's approved projects. Checks the query first.
-    async fn task_filter(&self, query: TaskQuery) -> Result<TaskFilter> {
+    pub(crate) async fn task_filter(&self, query: TaskQuery) -> Result<TaskFilter> {
         self.need(ApiTokenScope::TasksRead)?;
         let (sort, order) = query
             .sort
