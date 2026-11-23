@@ -2002,34 +2002,7 @@ impl TaskRepository {
             "SELECT {} FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.workspace_id = ",
             task_columns(self.database.backend(), false, scope)
         ));
-        query.push_bind(workspace_id.to_string());
-        query
-            .push(" AND tasks.deleted_at IS NULL AND projects.deleted_at IS NULL AND ")
-            .push(scope.project("tasks.project_id"));
-        task_filter::push_filter(
-            &mut query,
-            &filter.tree,
-            &task_filter::FilterContext {
-                scope,
-                actor_id,
-                now,
-            },
-        );
-        task_filter::push_show_completed(&mut query, filter.show_completed, now);
-        if let Some(parent_id) = filter.parent_task_id {
-            query
-                .push(" AND tasks.parent_task_id = ")
-                .push_bind(parent_id.to_string());
-        }
-        if filter.sub_issues == SubIssuesDisplay::Hidden {
-            // A sub-issue whose parent is hidden shows no parent, so it lists as top-level.
-            query
-                .push(" AND NOT ")
-                .push(sub_issues::has_visible_parent_sql(
-                    scope,
-                    "tasks.parent_task_id",
-                ));
-        }
+        push_task_where(&mut query, workspace_id, actor_id, scope, filter, now);
         let column = task_sort_column(&filter.sort, &filter.order);
         let (operator, direction) = if filter.order == SortOrder::Asc {
             (">", " ASC")
@@ -2069,6 +2042,38 @@ impl TaskRepository {
         finish_page(tasks, limit, &fingerprint, |task| {
             task_cursor_key(task, filter)
         })
+    }
+
+    /// How many live tasks match `filter`, per project and status (every page of `tasks`, no
+    /// cursor). Ask AI quotes these counts instead of counting a page itself.
+    pub async fn task_counts(
+        &self,
+        workspace_id: Id,
+        actor_id: Id,
+        filter: &TaskFilter,
+        now: TimestampMillis,
+    ) -> Result<Vec<(Id, Id, i64)>, TaskError> {
+        let scope =
+            ProjectScope::of(&require_access(self.database.pool(), workspace_id, actor_id).await?);
+        task_filter::validate_filter(&filter.tree)?;
+        let mut query = SqlBuilder::new(
+            "SELECT tasks.project_id, tasks.status_id, CAST(COUNT(*) AS BIGINT) AS n FROM tasks \
+             JOIN projects ON projects.id = tasks.project_id WHERE tasks.workspace_id = ",
+        );
+        push_task_where(&mut query, workspace_id, actor_id, scope, filter, now);
+        query.push(
+            " GROUP BY tasks.project_id, tasks.status_id ORDER BY tasks.project_id, tasks.status_id",
+        );
+        let rows = query.build().fetch_all(self.database.pool()).await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    parse_id(row.get("project_id"))?,
+                    parse_id(row.get("status_id"))?,
+                    row.get::<i64, _>("n"),
+                ))
+            })
+            .collect()
     }
 
     /// Resolves a `{task_id}` path segment: a task UUID, or an identifier such as `ENG-12`
@@ -6087,4 +6092,45 @@ pub(super) fn parse_id(value: String) -> Result<Id, TaskError> {
 }
 fn parse_version(value: i64) -> Result<u64, TaskError> {
     u64::try_from(value).map_err(|_| TaskError::Conflict)
+}
+
+/// The `WHERE` of a task list after `tasks.workspace_id = `: the workspace, live tasks of live
+/// projects in the actor's scope, `filter`'s conditions, its completed window, parent and
+/// sub-issue display. Shared by `tasks` and `task_counts`, so a count covers the same tasks.
+fn push_task_where(
+    query: &mut SqlBuilder,
+    workspace_id: Id,
+    actor_id: Id,
+    scope: ProjectScope,
+    filter: &TaskFilter,
+    now: TimestampMillis,
+) {
+    query.push_bind(workspace_id.to_string());
+    query
+        .push(" AND tasks.deleted_at IS NULL AND projects.deleted_at IS NULL AND ")
+        .push(scope.project("tasks.project_id"));
+    task_filter::push_filter(
+        query,
+        &filter.tree,
+        &task_filter::FilterContext {
+            scope,
+            actor_id,
+            now,
+        },
+    );
+    task_filter::push_show_completed(query, filter.show_completed, now);
+    if let Some(parent_id) = filter.parent_task_id {
+        query
+            .push(" AND tasks.parent_task_id = ")
+            .push_bind(parent_id.to_string());
+    }
+    if filter.sub_issues == SubIssuesDisplay::Hidden {
+        // A sub-issue whose parent is hidden shows no parent, so it lists as top-level.
+        query
+            .push(" AND NOT ")
+            .push(sub_issues::has_visible_parent_sql(
+                scope,
+                "tasks.parent_task_id",
+            ));
+    }
 }

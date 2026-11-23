@@ -18,11 +18,14 @@ use super::engine::ToolRunner;
 
 /// Status categories of a finished task (`task_filter::DONE_CATEGORIES`).
 const DONE: [&str; 3] = ["completed", "cancelled", "duplicate"];
-/// The most tasks a list card carries (a list call returns at most 100).
-const MAX_LIST_ITEMS: usize = 100;
+/// The most tasks a list card carries (a list call returns at most 100); its totals still count every task.
+const MAX_LIST_ITEMS: usize = 50;
 const MAX_TITLE: usize = 300;
 /// The step that carries the summary card at the end of a message with changes (not a tool the model can call).
 pub(crate) const SUMMARY_TOOL: &str = "orbit_summary";
+/// The server's own count of the tasks a `list_tasks` call matches (`TaskTools::count_tasks_in_process`); a lookup
+/// only, never a tool of the model.
+pub(crate) const COUNT_TASKS: &str = "count_tasks";
 
 #[derive(Clone, Debug, Default)]
 struct Project {
@@ -118,7 +121,7 @@ impl Names {
         }
         let mut members = HashMap::new();
         let mut cursor: Option<String> = None;
-        // a few pages at most: names beyond them show as "1 more person"
+        // a few pages at most (500 people): anyone beyond them shows as "Unknown member"
         for _ in 0..5 {
             let mut input = json!({"limit": 100});
             if let Some(cursor) = &cursor {
@@ -146,10 +149,9 @@ impl Names {
             .iter()
             .filter_map(|task| task["project_id"].as_str().map(str::to_owned))
             .collect();
-        if projects.is_empty() && tasks.iter().all(|task| task["status_id"].is_null()) {
-            return;
+        if !projects.is_empty() {
+            self.load_projects(tools).await;
         }
-        self.load_projects(tools).await;
         for project in &projects {
             self.load_statuses(tools, project).await;
         }
@@ -192,7 +194,10 @@ fn text(value: &Value) -> String {
         .as_str()
         .unwrap_or_default()
         .chars()
-        .filter(|c| !c.is_control() || *c == ' ')
+        // no control characters, and no bidi overrides or isolates that could reorder what the user reads
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
         .take(MAX_TITLE)
         .collect()
 }
@@ -321,80 +326,172 @@ fn is_done(category: &str) -> bool {
     DONE.contains(&category)
 }
 
-/// Exact counts of a list of task cards: all, open and done, per project and per status (in first-seen order).
-pub(crate) fn totals(cards: &[Value], more: bool) -> Value {
+/// Exact counts from `(project, status, number of tasks)` rows: all, open and done, per project and per status (in
+/// first-seen order). `complete`: the counts cover every task that matches, not only the ones listed (`shown`). A
+/// task whose status could not be read leaves `open` and `done` unknown (`null`) rather than counting it as open.
+fn tally(
+    rows: impl IntoIterator<Item = (Option<Project>, Option<Status>, usize)>,
+    complete: bool,
+    shown: usize,
+) -> Value {
     let mut by_project: Vec<(String, String, usize)> = Vec::new();
     let mut by_status: Vec<(String, String, usize)> = Vec::new();
-    let mut done = 0;
-    for card in cards {
-        let project = &card["project"];
-        let (name, key) = (text(&project["name"]), text(&project["key"]));
-        let name = if name.is_empty() {
-            "No project".into()
-        } else {
-            name
-        };
+    let (mut all, mut done, mut unknown) = (0, 0, false);
+    for (project, status, count) in rows {
+        all += count;
+        let (name, key) = project.map_or_else(
+            || ("No project".to_owned(), String::new()),
+            |project| (project.name, project.key),
+        );
         match by_project
             .iter_mut()
             .find(|(n, k, _)| *n == name && *k == key)
         {
-            Some(entry) => entry.2 += 1,
-            None => by_project.push((name, key, 1)),
+            Some(entry) => entry.2 += count,
+            None => by_project.push((name, key, count)),
         }
-        let status = &card["status"];
-        let (name, category) = (text(&status["name"]), text(&status["category"]));
-        let name = if name.is_empty() {
-            "No status".into()
-        } else {
-            name
+        let (name, category) = match status {
+            Some(status) => {
+                if is_done(&status.category) {
+                    done += count;
+                }
+                (status.name, status.category)
+            }
+            None => {
+                unknown = true;
+                ("Unknown status".to_owned(), String::new())
+            }
         };
-        if is_done(&category) {
-            done += 1;
-        }
         match by_status
             .iter_mut()
             .find(|(n, c, _)| *n == name && *c == category)
         {
-            Some(entry) => entry.2 += 1,
-            None => by_status.push((name, category, 1)),
+            Some(entry) => entry.2 += count,
+            None => by_status.push((name, category, count)),
         }
     }
+    let known = |n: usize| if unknown { Value::Null } else { json!(n) };
     json!({
-        "tasks": cards.len(),
-        "open": cards.len() - done,
-        "done": done,
+        "tasks": all,
+        "open": known(all - done),
+        "done": known(done),
         "byProject": by_project.into_iter().map(|(name, key, count)| json!({"name": name, "key": key, "count": count})).collect::<Vec<_>>(),
         "byStatus": by_status.into_iter().map(|(name, category, count)| json!({"name": name, "category": category, "count": count})).collect::<Vec<_>>(),
-        "complete": !more,
+        "complete": complete,
+        "shown": shown,
     })
+}
+
+/// Totals of the listed tasks only (when the server's own count failed). Complete when no more pages follow.
+pub(crate) fn page_totals(names: &Names, tasks: &[&Value], more: bool) -> Value {
+    let rows = tasks.iter().map(|task| {
+        (
+            names.project(task["project_id"].as_str().unwrap_or_default()),
+            names.status(task["status_id"].as_str().unwrap_or_default()),
+            1,
+        )
+    });
+    tally(rows.collect::<Vec<_>>(), !more, tasks.len())
+}
+
+/// Totals of every task a `list_tasks` call matches, from the server's grouped count (`COUNT_TASKS`) with the same
+/// filter. `None` when the count failed.
+async fn query_totals<T: ToolRunner>(
+    names: &Names,
+    tools: &T,
+    input: &Value,
+    shown: usize,
+) -> Option<Value> {
+    let mut filter = input.as_object().cloned().unwrap_or_default();
+    filter.remove("cursor");
+    filter.remove("limit");
+    let counted = tools
+        .lookup(COUNT_TASKS, Value::Object(filter))
+        .await
+        .ok()?;
+    let rows: Vec<(String, String, usize)> = items(&counted)
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row["project_id"].as_str()?.to_owned(),
+                row["status_id"].as_str()?.to_owned(),
+                usize::try_from(row["count"].as_u64()?).ok()?,
+            ))
+        })
+        .collect();
+    let projects: HashSet<&str> = rows
+        .iter()
+        .map(|(project, _, _)| project.as_str())
+        .collect();
+    if !projects.is_empty() {
+        names.load_projects(tools).await;
+    }
+    for project in projects {
+        names.load_statuses(tools, project).await;
+    }
+    Some(tally(
+        rows.iter()
+            .map(|(project, status, count)| (names.project(project), names.status(status), *count))
+            .collect::<Vec<_>>(),
+        true,
+        shown,
+    ))
 }
 
 /// What the model is told with a list of tasks: the exact counts, so it never has to count.
 pub(crate) fn totals_for_model(totals: &Value) -> Value {
-    let named = |list: &Value| -> Map<String, Value> {
-        let mut out = Map::new();
-        for entry in list.as_array().into_iter().flatten() {
-            let mut name = text(&entry["name"]);
-            let key = text(&entry["key"]);
-            if !key.is_empty() {
-                name = format!("{name} ({key})");
-            }
-            out.insert(name, entry["count"].clone());
+    let mut by_project = Map::new();
+    for entry in totals["byProject"].as_array().into_iter().flatten() {
+        let mut name = text(&entry["name"]);
+        let key = text(&entry["key"]);
+        if !key.is_empty() {
+            name = format!("{name} ({key})");
         }
-        out
-    };
-    let mut by_status = BTreeMap::new();
+        by_project.insert(name, entry["count"].clone());
+    }
+    // statuses of different projects can share a name: their counts add up
+    let mut by_status: BTreeMap<String, u64> = BTreeMap::new();
     for entry in totals["byStatus"].as_array().into_iter().flatten() {
-        by_status.insert(text(&entry["name"]), entry["count"].clone());
+        *by_status.entry(text(&entry["name"])).or_default() += entry["count"].as_u64().unwrap_or(0);
     }
     json!({
         "tasks": totals["tasks"],
         "open": totals["open"],
         "done": totals["done"],
-        "by_project": named(&totals["byProject"]),
+        "by_project": by_project,
         "by_status": by_status,
         "complete": totals["complete"],
+        "shown": totals["shown"],
     })
+}
+
+/// The text the model gets of a `list_tasks` result: `totals` and `next_cursor` first, then as many whole tasks as fit
+/// in `limit` bytes (with `items_omitted` when some did not), so the counts are never cut off.
+pub(crate) fn list_model_text(value: &Value, limit: usize) -> String {
+    let all = items(value);
+    let mut text = format!(
+        "{{\"totals\":{},\"next_cursor\":{}",
+        value["totals"], value["next_cursor"]
+    );
+    let mut list = String::new();
+    let mut shown = 0;
+    for item in &all {
+        let item = item.to_string();
+        // room for the closing text and the omitted count
+        if text.len() + list.len() + item.len() + 64 > limit {
+            break;
+        }
+        if shown > 0 {
+            list.push(',');
+        }
+        list.push_str(&item);
+        shown += 1;
+    }
+    if shown < all.len() {
+        text.push_str(&format!(",\"items_omitted\":{}", all.len() - shown));
+    }
+    text.push_str(&format!(",\"items\":[{list}]}}"));
+    text
 }
 
 /// The card of a read tool's result, if it has one. For `list_tasks` the result the model sees also gets `totals`.
@@ -402,6 +499,7 @@ pub(crate) async fn read_card<T: ToolRunner>(
     names: &Names,
     tools: &T,
     tool: &str,
+    input: &Value,
     value: &mut Value,
     workspace_id: Id,
 ) -> Option<Value> {
@@ -411,14 +509,19 @@ pub(crate) async fn read_card<T: ToolRunner>(
             task_card(names, value, workspace_id)
         }
         "list_tasks" => {
-            let tasks: Vec<&Value> = items(value).into_iter().take(MAX_LIST_ITEMS).collect();
+            let tasks: Vec<&Value> = items(value);
             names.prepare(tools, &tasks).await;
+            let more = value["next_cursor"].as_str().is_some_and(|c| !c.is_empty());
+            let totals = match query_totals(names, tools, input, tasks.len()).await {
+                Some(totals) => totals,
+                None => page_totals(names, &tasks, more),
+            };
+            // the card keeps the first tasks only (the display log stays small); its totals count them all
             let cards: Vec<Value> = tasks
                 .iter()
+                .take(MAX_LIST_ITEMS)
                 .filter_map(|task| task_card(names, task, workspace_id))
                 .collect();
-            let more = value["next_cursor"].as_str().is_some_and(|c| !c.is_empty());
-            let totals = totals(&cards, more);
             if let Some(object) = value.as_object_mut() {
                 object.insert("totals".into(), totals_for_model(&totals));
             }
@@ -478,40 +581,72 @@ pub(crate) async fn change_card<T: ToolRunner>(
     }
 }
 
-/// One line of the summary of a message's changes: what was done to what, and its page.
+/// One line of the summary of a message's changes: what was done (past tense) to what, and its page. The name comes
+/// from the change's result, else from its (approved) arguments.
 pub(crate) fn change_entry(
     tool: &str,
     input: &Value,
+    value: &Value,
     card: Option<&Value>,
     href: Option<String>,
 ) -> Value {
-    let verb = match tool {
-        "create_task" => "Created".to_owned(),
-        "update_task" => "Updated".to_owned(),
-        _ => {
-            let words = tool.replace('_', " ");
-            let mut chars = words.chars();
+    let (verb, object) = tool.split_once('_').unwrap_or((tool, ""));
+    let past = match verb {
+        "create" => "Created".to_owned(),
+        "update" => "Updated".to_owned(),
+        "delete" => "Deleted".to_owned(),
+        "restore" => "Restored".to_owned(),
+        "move" => "Moved".to_owned(),
+        "duplicate" => "Duplicated".to_owned(),
+        "trash" => "Trashed".to_owned(),
+        "add" => "Added".to_owned(),
+        "remove" => "Removed".to_owned(),
+        "mark" => "Marked".to_owned(),
+        "set" => "Set".to_owned(),
+        other => {
+            let mut chars = other.chars();
             chars
                 .next()
                 .map(|first| first.to_uppercase().chain(chars).collect())
                 .unwrap_or_default()
         }
     };
-    let (key, title) = match card {
-        Some(card) => (card["key"].clone(), text(&card["title"])),
+    let (verb, key, title) = match card {
+        // a task card names the task by its key
+        Some(card) => (past, card["key"].clone(), text(&card["title"])),
         None => (
+            format!("{past} {}", object.replace('_', " "))
+                .trim()
+                .to_owned(),
             Value::Null,
-            ["title", "name"]
-                .iter()
-                .map(|field| text(&input[*field]))
-                .find(|title| !title.is_empty())
-                .unwrap_or_default(),
+            [
+                &value["title"],
+                &value["name"],
+                &input["title"],
+                &input["name"],
+            ]
+            .into_iter()
+            .map(text)
+            .find(|title| !title.is_empty())
+            .unwrap_or_default(),
         ),
     };
     let href = card
         .and_then(|card| card["href"].as_str().map(str::to_owned))
         .or(href);
     json!({"verb": verb, "key": key, "title": title, "href": href})
+}
+
+/// The panel's view of a result without a card: the view as it is, but never a `card` field of the tool's own
+/// (only the server's cards are cards).
+pub(crate) fn strip_card(client: &str) -> String {
+    match serde_json::from_str::<Value>(client) {
+        Ok(Value::Object(mut object)) if object.contains_key("card") => {
+            object.remove("card");
+            Value::Object(object).to_string()
+        }
+        _ => client.to_owned(),
+    }
 }
 
 pub(crate) fn summary_card(changes: &[Value]) -> Value {

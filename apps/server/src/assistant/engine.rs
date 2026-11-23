@@ -322,12 +322,12 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                     ),
                 )
                 .await;
-                return self.finish().await;
+                return self.finish(state).await;
             }
             if Instant::now() >= deadline {
                 self.say(state, "I stopped here: this took longer than the time limit. Tell me to continue if you want me to go on.")
                     .await;
-                return self.finish().await;
+                return self.finish(state).await;
             }
             let refusal = match self.hooks.take_request().await {
                 Gate::Open => None,
@@ -343,7 +343,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             };
             if let Some(text) = refusal {
                 self.say(state, text).await;
-                return self.finish().await;
+                return self.finish(state).await;
             }
             state.turn.model_turns += 1;
             let applying = state.applying.take();
@@ -364,7 +364,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             let Some(reservation) = self.hooks.reserve_usage(self.model, estimate).await else {
                 self.say(state, "Ask AI cannot check this workspace's limits right now, so it stops here. Try again shortly.")
                     .await;
-                return self.finish().await;
+                return self.finish(state).await;
             };
             let message_id = format!("msg-{}", Id::new_v7());
             state.display.push(agui::assistant_message(&message_id));
@@ -402,13 +402,13 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 Err(ProviderError::Cancelled) => {
                     self.say(state, "I stopped here: this took longer than the time limit. Tell me to continue if you want me to go on.")
                         .await;
-                    return self.finish().await;
+                    return self.finish(state).await;
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "assistant model request failed");
                     self.say(state, &provider_error_text(&error, self.model))
                         .await;
-                    return self.finish().await;
+                    return self.finish(state).await;
                 }
                 Ok(turn) => turn,
             };
@@ -420,7 +420,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                     &format!("The model's safety system declined this request (category: {category}). Try rephrasing it."),
                 )
                 .await;
-                return self.finish().await;
+                return self.finish(state).await;
             }
             let tool_uses: Vec<Block> = turn
                 .content
@@ -455,8 +455,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                     }]));
                     continue;
                 }
-                self.summarize(state, &message_id).await;
-                return self.finish().await;
+                self.summarize(state, Some(&message_id)).await;
+                return self.finish(state).await;
             }
             let truncated = turn.stop == StopReason::MaxTokens;
             match self
@@ -740,14 +740,18 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                         &self.names,
                         self.tools,
                         name,
+                        &input,
                         &mut value,
                         self.workspace_id,
                     )
                     .await;
-                    let mut result = success(nonce, name, &value);
-                    if value.get("totals").is_some() && name == "list_tasks" {
-                        result = with_note(result, TOTALS_NOTE);
-                    }
+                    let mut result = if name == "list_tasks" && value.get("totals").is_some() {
+                        // the counts first and whole tasks after them, so a long list never cuts the counts off
+                        let text = cards::list_model_text(&value, MODEL_RESULT_LIMIT);
+                        with_note(success_text(nonce, name, text, &value), TOTALS_NOTE)
+                    } else {
+                        success(nonce, name, &value)
+                    };
                     let page = self.registry.get(name).map(|def| def.label);
                     if let Some(label) = page
                         && label.shows
@@ -810,6 +814,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 state.turn.changes.push(cards::change_entry(
                     name,
                     &input,
+                    &value,
                     card.as_ref(),
                     url.clone(),
                 ));
@@ -883,19 +888,31 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
     }
 
     /// The card that ends a message which made changes: one line and link per change.
-    async fn summarize(&self, state: &mut ConversationState, message_id: &str) {
+    /// In `message_id`, or in a message of its own when the run stops early (step or time limit, an error).
+    async fn summarize(&self, state: &mut ConversationState, message_id: Option<&str>) {
         if state.turn.changes.is_empty() {
             return;
         }
+        let changes = std::mem::take(&mut state.turn.changes);
+        let message_id = match message_id {
+            Some(id) => id.to_owned(),
+            None => {
+                let id = format!("msg-{}", Id::new_v7());
+                state.display.push(agui::assistant_message(&id));
+                id
+            }
+        };
         let id = format!("summary-{}", Id::new_v7());
-        self.announce(state, message_id, &id, cards::SUMMARY_TOOL, &json!({}))
+        self.announce(state, &message_id, &id, cards::SUMMARY_TOOL, &json!({}))
             .await;
-        let content = json!({"card": cards::summary_card(&state.turn.changes)}).to_string();
+        let content = json!({"card": cards::summary_card(&changes)}).to_string();
         self.out.tool_result(&id, &content).await;
         state.display.push(agui::tool_message(&id, &content));
     }
 
-    async fn finish(&self) -> Outcome {
+    /// Ends the run; changes made in this message and not summed up yet get their summary first.
+    async fn finish(&self, state: &mut ConversationState) -> Outcome {
+        self.summarize(state, None).await;
         self.out
             .run_finished(self.thread_id, self.run_id, None)
             .await;
@@ -941,14 +958,17 @@ fn page_note(follow_along: bool, url: &str) -> String {
     }
 }
 
-const TOTALS_NOTE: &str = "`totals` holds exact counts of this result, worked out by Orbit; quote them and do not count \
-the items yourself. If `complete` is false, more tasks match: say the counts cover this page only.";
+const TOTALS_NOTE: &str = "`totals` holds exact counts worked out by Orbit: quote them and never count the items \
+yourself. When `complete` is true they cover every task that matches, also those not listed here (`shown` were listed; \
+`items_omitted` were left out of this text for length). When `complete` is false they cover the listed tasks only: \
+say so. `open` and `done` are null when a status could not be read: then do not give those numbers.";
 
 /// The panel's view of a result, with its card (built by the server from the result) when it has one.
 fn with_card(mut result: CallResult, card: Option<Value>) -> CallResult {
-    if let Some(card) = card {
-        result.client = cards::attach(&result.client, card);
-    }
+    result.client = match card {
+        Some(card) => cards::attach(&result.client, card),
+        None => cards::strip_card(&result.client),
+    };
     result
 }
 
@@ -967,7 +987,11 @@ fn display_message<'s>(state: &'s mut ConversationState, id: &str) -> Option<&'s
 }
 
 fn success(nonce: &str, name: &str, value: &Value) -> CallResult {
-    let mut text = value.to_string();
+    success_text(nonce, name, value.to_string(), value)
+}
+
+/// A result whose model text is `text` (cut at the limit), and whose panel view is `value`.
+fn success_text(nonce: &str, name: &str, mut text: String, value: &Value) -> CallResult {
     if text.len() > MODEL_RESULT_LIMIT {
         let cut = (0..=MODEL_RESULT_LIMIT)
             .rev()

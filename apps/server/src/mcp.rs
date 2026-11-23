@@ -202,6 +202,64 @@ impl TaskTools {
     ) -> Result<CallToolResult, ErrorData> {
         self.run(std::slice::from_ref(&principal), request).await
     }
+
+    /// Ask AI's exact totals of a `list_tasks` call: how many tasks its arguments match over all
+    /// pages, per project and status. Not an MCP tool; the same arguments and checks as
+    /// `list_tasks` (cursor and limit are ignored).
+    pub(crate) async fn count_tasks_in_process(
+        &self,
+        principal: ApiTokenPrincipal,
+        arguments: serde_json::Map<String, Value>,
+    ) -> Result<Value, String> {
+        let a: ListTasksArgs = serde_json::from_value(Value::Object(arguments))
+            .map_err(|_| "Invalid tool arguments".to_owned())?;
+        let api = self
+            .api
+            .authorize(&principal, ApiTokenScope::TasksRead, self.request_id)
+            .await
+            .map_err(|_| "The tasks could not be counted".to_owned())?;
+        let invalid = |error: ErrorData| error.message.to_string();
+        let project_id = a
+            .project_id
+            .as_deref()
+            .map(parse_id)
+            .transpose()
+            .map_err(invalid)?;
+        let milestone = a
+            .milestone_id
+            .as_deref()
+            .map(parse_milestone_filter)
+            .transpose()
+            .map_err(|_| "Invalid tool arguments".to_owned())?;
+        let cycle = a
+            .cycle_id
+            .as_deref()
+            .map(parse_cycle_filter)
+            .transpose()
+            .map_err(|_| "Invalid tool arguments".to_owned())?;
+        let parent_task_id = api
+            .optional_task_id(a.parent_task_id.as_deref())
+            .await
+            .map_err(|_| "Unknown parent task".to_owned())?;
+        let counts = api
+            .task_counts(TaskQuery {
+                project_id,
+                query: a.query,
+                milestone,
+                cycle,
+                parent_task_id,
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| "The tasks could not be counted".to_owned())?;
+        let items: Vec<Value> = counts
+            .into_iter()
+            .map(|(project, status, count)| {
+                json!({"project_id": project.to_string(), "status_id": status.to_string(), "count": count})
+            })
+            .collect();
+        Ok(json!({ "items": items }))
+    }
 }
 
 /// Every tool definition: the MCP list, and the source of Ask AI's registry

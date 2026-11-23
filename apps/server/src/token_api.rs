@@ -1064,7 +1064,9 @@ impl Authorized<'_> {
             .await?)
     }
 
-    pub async fn list_tasks(&self, query: TaskQuery) -> Result<Page<TaskView>> {
+    /// The filter of a task list (`list_tasks`, `task_counts`): the query's conditions within the
+    /// token's approved projects. Checks the query first.
+    async fn task_filter(&self, query: TaskQuery) -> Result<TaskFilter> {
         self.need(ApiTokenScope::TasksRead)?;
         let (sort, order) = query
             .sort
@@ -1213,17 +1215,23 @@ impl Authorized<'_> {
                 json!({ "instant": after.as_millis() }),
             ));
         }
-        let filter = TaskFilter {
+        Ok(TaskFilter {
             tree: FilterGroup {
                 op: GroupOp::And,
                 children,
             },
             show_completed: ShowCompleted::All,
-            sort: sort.clone(),
-            order: order.clone(),
+            sort,
+            order,
             parent_task_id: query.parent_task_id,
             sub_issues: SubIssuesDisplay::Flat,
-        };
+        })
+    }
+
+    pub async fn list_tasks(&self, query: TaskQuery) -> Result<Page<TaskView>> {
+        let cursor = query.cursor.clone();
+        let limit = query.limit.unwrap_or(50);
+        let filter = self.task_filter(query).await?;
         let p = self.principal;
         let page = self
             .api
@@ -1232,7 +1240,7 @@ impl Authorized<'_> {
                 p.workspace_id,
                 p.actor_id,
                 &filter,
-                query.cursor.as_deref(),
+                cursor.as_deref(),
                 limit,
                 TimestampMillis::now(),
             )
@@ -1241,6 +1249,18 @@ impl Authorized<'_> {
             items: self.views(page.items).await?,
             next_cursor: page.next_cursor,
         })
+    }
+
+    /// How many tasks a `list_tasks` query matches over all its pages, per project and status
+    /// (Ask AI's exact totals; the cursor and limit do not matter).
+    pub async fn task_counts(&self, query: TaskQuery) -> Result<Vec<(Id, Id, i64)>> {
+        let filter = self.task_filter(query).await?;
+        let p = self.principal;
+        Ok(self
+            .api
+            .tasks
+            .task_counts(p.workspace_id, p.actor_id, &filter, TimestampMillis::now())
+            .await?)
     }
 
     pub async fn get_task(&self, task_ref: &str) -> Result<TaskView> {

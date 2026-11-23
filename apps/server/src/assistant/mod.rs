@@ -864,6 +864,20 @@ impl ToolRunner for SessionTools {
             }
         })
     }
+
+    fn lookup<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            match (name, input) {
+                (cards::COUNT_TASKS, Value::Object(arguments)) => {
+                    self.tools
+                        .count_tasks_in_process(self.principal.clone(), arguments)
+                        .await
+                }
+                (cards::COUNT_TASKS, _) => Err("The arguments must be an object.".to_owned()),
+                (name, input) => self.call(name, input).await,
+            }
+        })
+    }
 }
 
 struct DbHooks {
