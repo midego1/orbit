@@ -508,7 +508,8 @@ function Step(props: ToolCallMessagePartProps) {
   const note = line === view.subject || linkOnly ? '' : line
   const isChange = view.risk !== 'read'
   return (
-    <div className="flex min-w-0 flex-col">
+    // the step that runs now gets a soft ring in the state's colour (index.css)
+    <div data-assistant-step={outcome === 'running' ? 'running' : undefined} className="flex min-w-0 flex-col">
       <div className="flex min-w-0 items-center gap-2 text-[0.8125rem]">
         <span className="flex size-4 shrink-0 items-center justify-center">
           {linkOnly ? <ArrowUpRight className="size-3.5 text-muted-foreground" aria-hidden="true" /> : <OutcomeIcon outcome={outcome} />}

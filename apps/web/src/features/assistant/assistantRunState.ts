@@ -168,8 +168,10 @@ export function syncDocumentTitle(state: AssistantRunState, doc: Pick<Document, 
   if (next !== doc.title) doc.title = next
 }
 
-/** How the page edge moves: thinking pulses slowly, unless the user asked for less motion. */
-export function edgeMotion(state: AssistantRunState, reducedMotion: boolean): 'none' | 'steady' | 'pulse' {
+/** How Ask AI's working visuals move (the light around the window edge, the status line, the running step): the light
+    travels while Ask AI thinks or changes, and everything holds still while a change waits for approval or when the
+    user asked for less motion. */
+export function edgeMotion(state: AssistantRunState, reducedMotion: boolean): 'none' | 'steady' | 'orbit' {
   if (state === 'idle') return 'none'
-  return state === 'thinking' && !reducedMotion ? 'pulse' : 'steady'
+  return state !== 'waiting' && !reducedMotion ? 'orbit' : 'steady'
 }

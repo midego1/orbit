@@ -757,63 +757,180 @@ html .bn-mobile-formatting-toolbar {
 }
 
 /*
- * Ask AI's state colours (features/assistant/assistantRunState.ts): a thin edge around the window and the panel, the
- * panel's status line, and the approval card. Tune the colours here only. thinking: Orbit's chart blue, a slow pulse;
- * changing: amber, while an approved change runs; waiting: violet, steady, and the page dims a little. The edge and
- * the dim never take clicks. Every state also has an icon and a text in the panel: colour is never the only sign.
+ * Ask AI while it works (features/assistant/assistantRunState.ts, AssistantRunIndicators.tsx). Tune every colour, size
+ * and timing in this block only.
+ * - thinking (blue to cyan) and changing (amber to orange): a light travels around the window edge with a soft glow
+ *   inward; changing goes a little faster. The same light runs along the top of the panel's status line, the status
+ *   icon moves, the status text shimmers, and the running step has a soft pulsing ring.
+ * - waiting (violet): everything stops. The edge and its glow stay violet and steady, the page dims a little, and the
+ *   approval card has a steady violet ring.
+ * - prefers-reduced-motion: the same colours, nothing moves.
+ * The edge, the dim and the bar never take clicks. Every state also has an icon and a text: colour is never the only
+ * sign. Only transform, opacity and the two properties below are animated.
  */
+@property --assistant-edge-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+@property --assistant-shimmer-at {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: -40%;
+}
+
 :root {
+  /* tone = the state's colour; glint = the head of the travelling light */
   --assistant-thinking: var(--chart-2);
+  --assistant-thinking-glint: oklch(0.715 0.143 215.221);
   --assistant-changing: oklch(0.666 0.179 58.318);
+  --assistant-changing-glint: oklch(0.646 0.222 41.116);
   --assistant-waiting: oklch(0.541 0.281 293.009);
   --assistant-dim: oklch(0 0 0 / 5%);
+
+  /* window edge: the line, the glow inward, the glow's strength at the edge (0–1), and how much of the tone the edge
+     keeps away from the travelling light */
+  --assistant-edge-line: 3px;
+  --assistant-edge-glow: 36px;
+  --assistant-edge-glow-strength: 0.45;
+  --assistant-edge-floor: 32%;
+  /* one lap of the light around the window */
+  --assistant-orbit-thinking: 7s;
+  --assistant-orbit-changing: 4.2s;
+  /* the edge fades in quickly, and out a little later and slower, so a short pause between steps does not flicker */
+  --assistant-fade-in: 450ms;
+  --assistant-fade-out: 700ms;
+  --assistant-fade-out-delay: 200ms;
+
+  /* panel: the light along the top of the status line, the status icon, the text shimmer and the running step's ring */
+  --assistant-bar-height: 2px;
+  --assistant-bar-thinking: 2.6s;
+  --assistant-bar-changing: 1.6s;
+  --assistant-icon-thinking: 1.4s;
+  --assistant-icon-changing: 1.6s;
+  --assistant-shimmer: 2.4s;
+  --assistant-ring-pulse: 1.8s;
 }
 .dark {
   --assistant-thinking: var(--chart-1);
+  --assistant-thinking-glint: oklch(0.865 0.127 207.078);
   --assistant-changing: oklch(0.828 0.189 84.429);
+  --assistant-changing-glint: oklch(0.75 0.183 55.934);
   --assistant-waiting: oklch(0.702 0.183 293.541);
   --assistant-dim: oklch(0 0 0 / 25%);
+  --assistant-edge-glow-strength: 0.55;
+}
+@media (max-width: 640px) {
+  :root {
+    --assistant-edge-glow: 22px;
+  }
 }
 
 [data-assistant-state] {
   --assistant-tone: transparent;
+  --assistant-glint: transparent;
 }
-[data-assistant-state='thinking'] {
+[data-assistant-state='thinking'],
+[data-assistant-edge-layer='thinking'] {
   --assistant-tone: var(--assistant-thinking);
+  --assistant-glint: var(--assistant-thinking-glint);
 }
-[data-assistant-state='changing'] {
+[data-assistant-state='changing'],
+[data-assistant-edge-layer='changing'] {
   --assistant-tone: var(--assistant-changing);
+  --assistant-glint: var(--assistant-changing-glint);
 }
-[data-assistant-state='waiting'] {
+[data-assistant-state='waiting'],
+[data-assistant-edge-layer='waiting'] {
   --assistant-tone: var(--assistant-waiting);
+  --assistant-glint: var(--assistant-waiting);
 }
 
+/* The window edge: one layer per state, which cross-fade. `data-edge-tone` keeps the last state while the edge fades
+   out, so it does not lose its colour first. */
 [data-assistant-edge] {
   position: fixed;
   inset: 0;
   z-index: 45;
   pointer-events: none;
+  contain: strict;
   opacity: 0;
-  box-shadow:
-    inset 0 0 0 2px var(--assistant-tone),
-    inset 0 0 28px -10px var(--assistant-tone);
-  transition: opacity 300ms var(--ease-out, ease-out);
+  transition: opacity var(--assistant-fade-out) ease-in-out var(--assistant-fade-out-delay);
 }
 [data-assistant-edge]:not([data-assistant-state='idle']) {
   opacity: 1;
+  transition: opacity var(--assistant-fade-in) var(--ease-out, ease-out);
+}
+[data-assistant-edge-layer] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity var(--assistant-fade-in) ease-in-out;
+  background: var(--assistant-tone);
+  /* a solid line along each side, and a glow that fades inward from each side */
+  mask-image:
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(to bottom, rgb(0 0 0 / var(--assistant-edge-glow-strength)), rgb(0 0 0 / calc(var(--assistant-edge-glow-strength) * 0.3)) 45%, transparent),
+    linear-gradient(to top, rgb(0 0 0 / var(--assistant-edge-glow-strength)), rgb(0 0 0 / calc(var(--assistant-edge-glow-strength) * 0.3)) 45%, transparent),
+    linear-gradient(to right, rgb(0 0 0 / var(--assistant-edge-glow-strength)), rgb(0 0 0 / calc(var(--assistant-edge-glow-strength) * 0.3)) 45%, transparent),
+    linear-gradient(to left, rgb(0 0 0 / var(--assistant-edge-glow-strength)), rgb(0 0 0 / calc(var(--assistant-edge-glow-strength) * 0.3)) 45%, transparent);
+  mask-position: top, bottom, left, right, top, bottom, left, right;
+  mask-size:
+    100% var(--assistant-edge-line),
+    100% var(--assistant-edge-line),
+    var(--assistant-edge-line) 100%,
+    var(--assistant-edge-line) 100%,
+    100% var(--assistant-edge-glow),
+    100% var(--assistant-edge-glow),
+    var(--assistant-edge-glow) 100%,
+    var(--assistant-edge-glow) 100%;
+  mask-repeat: no-repeat;
+}
+[data-assistant-edge][data-edge-tone='thinking'] [data-assistant-edge-layer='thinking'],
+[data-assistant-edge][data-edge-tone='changing'] [data-assistant-edge-layer='changing'],
+[data-assistant-edge][data-edge-tone='waiting'] [data-assistant-edge-layer='waiting'] {
+  opacity: 1;
+}
+/* two lights, half a lap apart, each a bright head (glint) with a tail in the tone; the rest of the edge keeps a
+   little of the tone */
+[data-assistant-edge-layer='thinking'],
+[data-assistant-edge-layer='changing'] {
+  --assistant-edge-rest: color-mix(in oklch, var(--assistant-tone) var(--assistant-edge-floor), transparent);
+  background: repeating-conic-gradient(
+    from var(--assistant-edge-angle) at 50% 50%,
+    var(--assistant-edge-rest) 0deg,
+    var(--assistant-edge-rest) 50deg,
+    color-mix(in oklch, var(--assistant-tone) 65%, transparent) 120deg,
+    var(--assistant-tone) 160deg,
+    var(--assistant-glint) 174deg,
+    var(--assistant-edge-rest) 180deg
+  );
 }
 @media (prefers-reduced-motion: no-preference) {
-  [data-assistant-edge][data-motion='pulse'] {
-    animation: assistant-edge-pulse 2.8s ease-in-out infinite;
+  /* a layer only runs while its state shows (and holds still while it fades out), so it never jumps */
+  [data-assistant-edge-layer='thinking'] {
+    animation: assistant-edge-orbit var(--assistant-orbit-thinking) linear infinite paused;
+  }
+  [data-assistant-edge-layer='changing'] {
+    animation: assistant-edge-orbit var(--assistant-orbit-changing) linear infinite paused;
+  }
+  [data-assistant-edge][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-edge-layer='thinking'],
+  [data-assistant-edge][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-edge-layer='changing'] {
+    animation-play-state: running;
   }
 }
-@keyframes assistant-edge-pulse {
-  0%,
-  100% {
-    opacity: 1;
+@media (prefers-reduced-motion: reduce) {
+  /* no travelling light: an even edge in the tone */
+  [data-assistant-edge-layer] {
+    background: var(--assistant-tone);
   }
-  50% {
-    opacity: 0.35;
+}
+@keyframes assistant-edge-orbit {
+  to {
+    --assistant-edge-angle: 360deg;
   }
 }
 
@@ -839,13 +956,187 @@ aside[data-assistant][data-assistant-state='waiting'] {
   border-color: var(--assistant-tone);
   box-shadow: 0 0 24px -12px var(--assistant-tone);
 }
+
+/* The status line: a light along its top, the icon in a small tinted disc, and the text */
 [data-assistant-status]:not([data-assistant-state='idle']) {
   background: color-mix(in oklch, var(--assistant-tone) 10%, transparent);
+}
+[data-assistant-bar] {
+  position: absolute;
+  inset: 0 0 auto;
+  height: var(--assistant-bar-height);
+  overflow: hidden;
+  pointer-events: none;
+  background: color-mix(in oklch, var(--assistant-tone) 35%, transparent);
+  box-shadow: 0 0 10px 0 color-mix(in oklch, var(--assistant-tone) 55%, transparent);
+}
+/* twice as wide as the bar, with the same light in each half, so sliding it by half loops without a seam */
+[data-assistant-bar]::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 200%;
+  background: linear-gradient(
+    90deg,
+    transparent 4%,
+    color-mix(in oklch, var(--assistant-tone) 70%, transparent) 30%,
+    var(--assistant-glint) 45%,
+    transparent 50%,
+    transparent 54%,
+    color-mix(in oklch, var(--assistant-tone) 70%, transparent) 80%,
+    var(--assistant-glint) 95%,
+    transparent 100%
+  );
+  transform: translateX(-50%);
+}
+[data-assistant-status][data-assistant-state='waiting'] [data-assistant-bar] {
+  background: var(--assistant-tone);
+}
+[data-assistant-status][data-assistant-state='waiting'] [data-assistant-bar]::before {
+  content: none;
+}
+[data-assistant-status-icon] {
+  background: color-mix(in oklch, var(--assistant-tone) 16%, transparent);
+}
+[data-assistant-status-icon]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+/* thinking: an arc turns around the disc; waiting: a steady ring */
+[data-assistant-status][data-assistant-state='thinking'] [data-assistant-status-icon]::after {
+  border: 1.5px solid transparent;
+  border-top-color: var(--assistant-tone);
+  border-right-color: color-mix(in oklch, var(--assistant-tone) 40%, transparent);
+}
+[data-assistant-status][data-assistant-state='waiting'] [data-assistant-status-icon]::after {
+  box-shadow: inset 0 0 0 1.5px var(--assistant-tone);
+}
+/* changing: a ring that keeps growing out of the disc */
+[data-assistant-status][data-assistant-state='changing'] [data-assistant-status-icon]::after {
+  box-shadow: 0 0 0 1.5px var(--assistant-tone);
+  opacity: 0;
+}
+
+/* the step that runs now: a soft ring in the state's colour, behind its text */
+[data-assistant-step='running'] {
+  position: relative;
+  isolation: isolate;
+}
+[data-assistant-step='running']::before {
+  content: '';
+  position: absolute;
+  inset: -5px -8px;
+  z-index: -1;
+  border-radius: calc(var(--radius) * 0.8);
+  pointer-events: none;
+  background: color-mix(in oklch, var(--assistant-tone) 7%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklch, var(--assistant-tone) 55%, transparent),
+    0 0 14px -2px color-mix(in oklch, var(--assistant-tone) 50%, transparent);
+  opacity: 0.85;
 }
 [data-assistant-approval] {
   box-shadow:
     0 0 0 1.5px var(--assistant-waiting),
     0 6px 20px -8px color-mix(in oklch, var(--assistant-waiting) 55%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-bar]::before {
+    animation: assistant-slide var(--assistant-bar-thinking) linear infinite;
+  }
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-bar]::before {
+    animation: assistant-slide var(--assistant-bar-changing) linear infinite;
+  }
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-status-icon] svg {
+    animation: assistant-icon-scan var(--assistant-icon-thinking) linear infinite;
+  }
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-status-icon]::after {
+    animation: assistant-spin var(--assistant-icon-thinking) linear infinite;
+  }
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-status-icon] svg {
+    animation: assistant-icon-pulse var(--assistant-icon-changing) ease-in-out infinite;
+  }
+  [data-assistant-status][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-status-icon]::after {
+    animation: assistant-icon-halo var(--assistant-icon-changing) ease-out infinite;
+  }
+  /* a band of the state's colour sweeps over the text */
+  [data-assistant-status][data-motion='orbit'] [data-assistant-status-text] {
+    background-image: linear-gradient(
+      100deg,
+      var(--foreground) calc(var(--assistant-shimmer-at) - 18%),
+      var(--assistant-tone) var(--assistant-shimmer-at),
+      var(--foreground) calc(var(--assistant-shimmer-at) + 18%)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: assistant-shimmer var(--assistant-shimmer) ease-in-out infinite;
+  }
+  [data-assistant-step='running']::before {
+    animation: assistant-ring-pulse var(--assistant-ring-pulse) ease-in-out infinite;
+  }
+}
+@keyframes assistant-slide {
+  from {
+    transform: translateX(-50%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes assistant-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* the magnifier circles a little, upright, as if it looks around */
+@keyframes assistant-icon-scan {
+  from {
+    transform: rotate(0deg) translateX(1.25px) rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg) translateX(1.25px) rotate(-360deg);
+  }
+}
+@keyframes assistant-icon-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+@keyframes assistant-icon-halo {
+  from {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(1.75);
+    opacity: 0;
+  }
+}
+@keyframes assistant-shimmer {
+  from {
+    --assistant-shimmer-at: -40%;
+  }
+  to {
+    --assistant-shimmer-at: 140%;
+  }
+}
+@keyframes assistant-ring-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media print {
