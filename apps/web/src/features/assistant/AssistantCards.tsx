@@ -1,6 +1,6 @@
 // The cards Ask AI shows for tool results (`cards.ts`). Every text in them is plain text in a React text node, never
 // Markdown or HTML, and every link is a checked in-app path (`cardPath`).
-import { Fragment, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ArrowRight, DocumentText, Folder2, TickCircle } from 'reicon-react'
 import { cn } from 'cn'
@@ -10,10 +10,10 @@ import { relativeTime } from '@/lib/format'
 import { PriorityIcon } from '@/features/tasks/components/PriorityIcon'
 import { TaskStatusIcon } from '@/features/tasks/components/TaskStatusIcon'
 import { PRIORITY_LABEL } from '@/features/tasks/taskMeta'
-import { findKnownKeys, groupTasks, isDone, type ApprovalPreview, type CardData, type CardStatus, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData } from './cards'
+import { groupTasks, isDone, type ApprovalPreview, type CardData, type CardStatus, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData } from './cards'
 
 /** Rows shown before "Show all". */
-export const LIST_PREVIEW = 5
+const LIST_PREVIEW = 5
 const NEUTRAL = '#94a3b8'
 
 const linkRing = 'outline-none focus-visible:ring-3 focus-visible:ring-ring/50'
@@ -114,13 +114,13 @@ function plural(n: number, one: string, many = `${one}s`): string {
 export function TaskListCard({ card }: { card: TasksCardData }) {
   const [all, setAll] = useState(card.items.length <= LIST_PREVIEW)
   const { totals } = card
-  let left = all ? Infinity : LIST_PREVIEW
-  const groups = groupTasks(card.items).flatMap((group) => {
-    if (left <= 0) return []
-    const tasks = group.tasks.slice(0, left)
-    left -= tasks.length
-    return [{ ...group, shown: tasks }]
-  })
+  const limit = all ? card.items.length : LIST_PREVIEW
+  const groups = groupTasks(card.items)
+    .map((group, index, every) => {
+      const before = every.slice(0, index).reduce((sum, earlier) => sum + earlier.tasks.length, 0)
+      return { ...group, shown: group.tasks.slice(0, Math.max(0, limit - before)) }
+    })
+    .filter((group) => group.shown.length > 0)
   return (
     <section data-slot="task-list-card" aria-label="Tasks" className="flex flex-col gap-1 rounded-lg border bg-card px-2 py-2">
       <p className="px-1.5 text-[0.6875rem] text-muted-foreground">
@@ -277,22 +277,3 @@ export function TaskChip({ task, text }: { task: KnownTask; text: string }) {
   )
 }
 
-/** Draws the known task keys of a run of an answer's plain text as chips (`MarkdownTextContext`); code is never a run. */
-export function taskChipRun(known: ReadonlyMap<string, KnownTask>) {
-  return function textRun(run: string, plain: (text: string) => ReactNode): ReactNode {
-    const matches = findKnownKeys(run, known)
-    if (matches.length === 0) return plain(run)
-    const parts: ReactNode[] = []
-    let cursor = 0
-    for (const match of matches) {
-      parts.push(
-        <Fragment key={match.start}>
-          {plain(run.slice(cursor, match.start))}
-          <TaskChip task={match.task} text={run.slice(match.start, match.end)} />
-        </Fragment>,
-      )
-      cursor = match.end
-    }
-    return [...parts, <Fragment key="rest">{plain(run.slice(cursor))}</Fragment>]
-  }
-}

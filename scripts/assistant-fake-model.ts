@@ -9,7 +9,10 @@
 //   then a confirmation, or "I did not create it" after a decline;
 // - "open docs": open_page /docs;  "show projects": list_projects;  "badge": an answer with an outside image;
 //   "diagram": a Mermaid block with an outside image node; "rename project to X": list_projects, then update_project
-//   (a structured change, which "Allow in this chat" may cover); anything else: an echo.
+//   (a structured change, which "Allow in this chat" may cover); "move GEN-2 to In Progress": get_task,
+//   list_task_statuses, then update_task (an approval with before → after); "tasks" / "open tasks": list_tasks, then an
+//   answer that quotes the totals Orbit worked out and names a few task keys (chips); "show GEN-1": get_task;
+//   "list docs": list_docs; anything else: an echo.
 
 const port = Number(process.argv[2] ?? 18_960)
 /** Optional pause before each answer (ms), so a recording looks like a real model at work. */
@@ -131,6 +134,23 @@ function answer(messages: Message[]): Response {
       const task = unwrap(content) as { identifier?: string } | null
       return say(`Created ${task?.identifier ?? 'the task'}.`)
     }
+    if (name === 'list_tasks') {
+      const listed = unwrap(content) as {
+        items?: { identifier?: string; title?: string }[]
+        totals?: { tasks: number; open: number; done: number; by_project?: Record<string, number>; by_status?: Record<string, number>; complete?: boolean }
+      } | null
+      const totals = listed?.totals
+      if (!totals) return say('I could not count them.')
+      const projects = Object.entries(totals.by_project ?? {}).map(([project, n]) => `- ${project}: ${n}`).join('\n')
+      const keys = (listed?.items ?? []).map((item) => item.identifier).filter(Boolean).slice(0, 3)
+      const page = totals.complete === false ? ' (first page only)' : ''
+      return say(`You have **${totals.tasks} tasks**${page}: ${totals.open} open and ${totals.done} done.\n\n${projects}\n\nStart with ${keys.join(', ')}. Keys I did not look up, such as ZZZ-99, stay plain text, and so does \`${keys[0] ?? 'GEN-1'}\` in code.`)
+    }
+    if (name === 'get_task') {
+      const task = unwrap(content) as { identifier?: string; title?: string } | null
+      return say(`${task?.identifier ?? 'That task'} is "${task?.title ?? ''}".`)
+    }
+    if (name === 'list_docs') return say('Those are your docs.')
     // repeats what Orbit told it: with Follow along off the page was not opened
     if (name === 'open_page') return say(/Not opened: Follow along is off/.test(content) ? 'Follow along is off, so I did not open it: use the go there link.' : 'Here are your docs.')
     if (name === 'list_projects') return say('Those are your projects.')
@@ -146,6 +166,10 @@ function answer(messages: Message[]): Response {
   if (/rename (the )?project to/i.test(asked)) return call('list_projects', {})
   if (/create a task/i.test(asked)) return call('list_projects', {}, 'Let me look at your projects first.')
   if (/open (my )?docs/i.test(asked)) return call('open_page', { path: '/docs' })
+  if (/list (my )?docs/i.test(asked)) return call('list_docs', {}, 'Let me look at your docs.')
+  const showTask = asked.match(/^show ([A-Z][A-Z0-9]*-\d+)/i)
+  if (showTask) return call('get_task', { task_id: showTask[1].toUpperCase() })
+  if (/\btasks\b/i.test(asked)) return call('list_tasks', { limit: 100 }, 'Let me look up your tasks.')
   if (/projects/i.test(asked)) return call('list_projects', {})
   return say(`You said: ${asked}`)
 }
