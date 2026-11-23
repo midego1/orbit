@@ -27,6 +27,8 @@ import { useWorkspace } from '@/features/workspaces/workspaceContext'
 import { useAllStatuses, useProjects } from '@/features/tasks/api/projects'
 import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
+import { deriveRun, IDLE_RUN } from './assistantRunState'
+import { AssistantStatusLine } from './AssistantRunIndicators'
 import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
 import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { taskChipRun } from './taskChipRun'
@@ -251,9 +253,9 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   const thinking = running && !callInFlight
 
   useEffect(() => {
-    assistantUi.setActivity(waiting ? 'waiting' : running ? 'working' : null)
-  }, [waiting, running])
-  useEffect(() => () => assistantUi.setActivity(null), [])
+    assistantUi.setRun(deriveRun({ running, messages }))
+  }, [running, messages])
+  useEffect(() => () => assistantUi.setRun(IDLE_RUN), [])
   useEffect(() => {
     input.current?.focus()
   }, [focusToken])
@@ -297,6 +299,7 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
 
   return (
     <PanelShell ref={root} onClose={onClose} tools={tools}>
+      <AssistantStatusLine />
       <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
         <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
           <ThreadPrimitive.Empty>
@@ -555,7 +558,7 @@ function ApprovalCard({ view, preview, allowable, onDecide }: { view: StepView; 
   const details = preview ? [...view.fields, ...view.details] : view.details
   const dangerous = view.risk === 'dangerous'
   return (
-    <section aria-label={`Approve: ${view.title}`} className="flex flex-col rounded-lg bg-card shadow-[0_0_0_1px_var(--border)]">
+    <section data-assistant-approval aria-label={`Approve: ${view.title}`} className="flex flex-col rounded-lg bg-card shadow-[0_0_0_1px_var(--border)]">
       <header className="flex flex-col gap-0.5 px-3 pt-2.5 pb-2">
         <p className="text-[0.8125rem] font-medium text-foreground">{view.title}</p>
         <p className={cn('text-xs', dangerous ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground')}>

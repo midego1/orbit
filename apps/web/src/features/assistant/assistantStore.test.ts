@@ -36,3 +36,13 @@ test('a reload keeps the panel open in that tab, and the wide column per browser
   assistantUi.reset()
   expect(assistantUi.get().open).toBe(false)
 })
+
+test('the run state starts idle, and the same run again changes nothing', () => {
+  expect(assistantUi.get().run).toEqual({ state: 'idle', text: '' })
+  assistantUi.setRun({ state: 'thinking', text: 'Thinking…' })
+  const before = assistantUi.get()
+  assistantUi.setRun({ state: 'thinking', text: 'Thinking…' })
+  expect(assistantUi.get()).toBe(before)
+  assistantUi.setRun({ state: 'thinking', text: 'Reading your docs…' })
+  expect(assistantUi.get().run.text).toBe('Reading your docs…')
+})
