@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { callSubject, deriveRun, edgeMotion, IDLE_RUN, statusText, syncDocumentTitle, taskKeys, titleFor, TITLE_PREFIX } from './assistantRunState'
 
-type Part = { type: string; toolName?: string; args?: unknown; result?: unknown; approval?: { approved?: boolean; resolution?: string } }
+type Part = { type: string; text?: string; toolName?: string; args?: unknown; result?: unknown; approval?: { approved?: boolean; resolution?: string } }
 const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] as Part[] })
 const assistant = (...content: Part[]) => ({ role: 'assistant', content })
 const call = (toolName: string, args: unknown, extra: Partial<Part> = {}): Part => ({ type: 'tool-call', toolName, args, ...extra })

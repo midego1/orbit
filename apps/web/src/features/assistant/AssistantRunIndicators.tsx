@@ -14,7 +14,7 @@ const subscribeMotion = (onChange: () => void) => {
 }
 const reducedMotion = () => globalThis.matchMedia?.(REDUCED_MOTION).matches ?? false
 
-export function useReducedMotion(): boolean {
+function useReducedMotion(): boolean {
   return useSyncExternalStore(subscribeMotion, reducedMotion, () => false)
 }
 
