@@ -36,8 +36,10 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   from an id and checked again in the panel.
 - A task key in an answer (`GEN-1`) is a link with the task's title and status on hover, but only when a card of this
   conversation named that task; other keys, and keys in code, stay text.
-- A task list the model sees carries `totals` (all, open, done, per project and per status), counted by Orbit, and
-  the model is told to quote them instead of counting.
+- A task list the model sees carries `totals` (all, open, done, per project and per status), counted by Orbit over
+  every task the call's filter matches (one grouped count with the same filter and access checks, not only the
+  page), and the model is told to quote them instead of counting. The counts come first in what the model reads; when
+  the tasks do not all fit, whole tasks are left out (`items_omitted`), never the counts.
 - **Follow along** (the eye button, on by default, saved per browser): the page goes to what Ask AI changed or
   opened. Off, the page stays and a "go there" link appears instead. The page never moves while you type in a field
   or have a dialog open.
