@@ -22,6 +22,11 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   column at the right of the page (Widen makes it half the window); on a phone it is a sheet.
 - Each step shows what Ask AI does (reads, then changes). A change shows an approval card with its full arguments;
   technical values (versions, ids without a name) are folded under **Details**.
+- A thin edge around the window and the panel shows what Ask AI is doing, with an icon and a status line at the top
+  of the panel ("Reading your projects…", "Changing GEN-3…"): blue while it thinks or reads (a slow pulse, none with
+  reduced motion), amber while an approved change runs, violet while a change waits for your approval. While it
+  waits, the rest of the page dims a little but stays usable, and the tab title starts with "(Approval needed)". The
+  colours are the `--assistant-*` variables in `apps/web/src/index.css`.
 - **Follow along** (the eye button, on by default, saved per browser): the page goes to what Ask AI changed or
   opened. Off, the page stays and a "go there" link appears instead. The page never moves while you type in a field
   or have a dialog open.
