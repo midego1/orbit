@@ -2,9 +2,12 @@
 // step arrives:
 // - Typing: focus sits in a text field or an editor outside Ask AI, or an input method is composing text there. Kept
 //   up to date from focus and composition events, so nothing is looked up at the moment of the step.
-// - A modal elsewhere: while a modal dialog is open, Base UI's focus manager marks everything outside it as inert
-//   (`data-base-ui-inert`, `inert` or `aria-hidden`). The Ask AI column is outside such a modal, so when the column
-//   itself is marked, another modal owns the screen. On a phone, Ask AI is its own sheet, which is not marked.
+// - A popup elsewhere: while any Base UI dialog, drawer, menu, popover, select or combobox is open, its focus manager
+//   marks everything outside it (`data-base-ui-inert`, `inert` or `aria-hidden`). The Ask AI column is outside such a
+//   popup, so when the column itself is marked, the user is busy with something else and the page stays (they get
+//   the "go there" link). On a phone, Ask AI is its own sheet, which is not marked.
+//   Also failing safe: when a focused field is removed from the page, some browsers send no focusout, so the guard
+//   holds until focus moves again.
 import { useCallback, useEffect, useRef, type RefObject } from 'react'
 
 /** Input types where a person types text (a checkbox or a button is not "typing"). */
@@ -19,7 +22,7 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return false
 }
 
-/** Whether `element` sits under a node that an open modal has made inert. */
+/** Whether `element` sits under a node that an open dialog or popup has marked inert. */
 export function shutOutByModal(element: Element | null): boolean {
   return !!element?.closest('[data-base-ui-inert], [inert], [aria-hidden="true"]')
 }

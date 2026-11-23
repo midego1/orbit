@@ -53,8 +53,7 @@ membership; send anything outside the workspace; act beyond your own access.
 
 **Known limitations:** Anthropic only (the provider interface is ready for an OpenAI-compatible one, not built);
 conversations are kept 6 hours per member and are not visible to admins; the daily limit is on tokens, not money
-(set a spend limit in the Anthropic Console too); Mermaid diagrams elsewhere in Orbit (not in answers) can still
-load outside images through HTML labels; no chat panel in the mobile app yet. Details: [docs/assistant.md](docs/assistant.md).
+(set a spend limit in the Anthropic Console too); no chat panel in the mobile app yet. Details: [docs/assistant.md](docs/assistant.md).
 
 **Known upstream test failures.** `cargo test -p orbit-server --lib assistant` passes on SQLite and Postgres. Four
 tests in `apps/server/tests/mcp_api.rs` fail on this branch and fail the same way on upstream `main` (same command,
@@ -62,8 +61,9 @@ both databases), so Ask AI does not cause them: `docs_and_chat_require_explicit_
 `mcp_route_is_mounted_in_the_application_and_rejects_oversized_bodies`,
 `tools_list_includes_required_cache_fields_for_current_protocol` and `writes_are_refused_in_a_read_only_cloud_workspace`.
 
-**How it was made.** AI-assisted: written with Claude Code (Anthropic) under human direction, reviewed by a person
-and by four independent security reviews before this branch. Upstream: [coollabsio/orbit](https://github.com/coollabsio/orbit).
+**How it was made.** Built with Claude Code (Anthropic) under the fork owner's direction; four independent AI-run
+security reviews (each finding fixed and covered by tests) and an AI-run review of this branch; tested by hand by the
+fork owner. Upstream: [coollabsio/orbit](https://github.com/coollabsio/orbit).
 
 ## Features
 

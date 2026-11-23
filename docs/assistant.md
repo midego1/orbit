@@ -48,9 +48,8 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   the workspace, and its threads are outside content); file uploads and downloads; and project membership. Nothing
   sends anything outside the workspace. Every MCP tool has a label in `registry.rs` (a test fails for a new tool
   without one), so a new tool stays out until someone decides.
-- Answers show no image from another site, draw no Mermaid diagram (its source shows as code: a diagram can load
-  images), and show the full address of every external link, so text the assistant read cannot make the browser
-  send data elsewhere.
+- Answers never render diagrams (a Mermaid block shows as code) or images from another site, and show the full
+  address of every external link, so text the assistant read cannot make the browser send data elsewhere.
 - Tool results, and the member's and workspace's names, reach the model marked as untrusted data.
 
 ## Limits
@@ -85,10 +84,6 @@ Changes made by Ask AI are audited as the member with request id `assistant` and
 `assistant.change` row (applied, declined or failed) per change. Settings changes write
 `workspace.ai_settings_updated` (never the key).
 
-## Known follow-up
+## Notes
 
-Mermaid diagrams on other pages (comments, docs) can still load outside images through HTML labels with inline
-styles, for content people write themselves. Answers never draw diagrams, and the assistant cannot write such
-content without a card, but an app-wide fix (`htmlLabels: false`, or stripping risky `style` attributes, and a CSP
-`img-src` review) is a separate task. `ORBIT_AI_MAX_DAILY_TOKENS` that is not a positive whole number is ignored with
-a warning at startup.
+`ORBIT_AI_MAX_DAILY_TOKENS` that is not a positive whole number is ignored with a warning at startup.

@@ -51,7 +51,7 @@ describe('useFollowGuard', () => {
     expect(result.current()).toBe(false)
   })
 
-  test('a modal elsewhere holds the page', () => {
+  test('a dialog or popup elsewhere holds the page', () => {
     const shell = element('div')
     const panel = element('section', {}, shell)
     const { result } = renderHook(() => useFollowGuard({ current: panel }))
