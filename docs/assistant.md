@@ -27,6 +27,17 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   reduced motion), amber while an approved change runs, violet while a change waits for your approval. While it
   waits, the rest of the page dims a little but stays usable, and the tab title starts with "(Approval needed)". The
   colours are the `--assistant-*` variables in `apps/web/src/index.css`.
+- Results show as cards, built by the server from the tool's own result (`apps/server/src/assistant/cards.rs`), never
+  from the model's text: a task (key, title, status, priority, assignees, due date; the card links to the task), a
+  task list (exact counts, rows grouped by project or status, five rows until **Show all**), docs and projects. An
+  approval for a task shows the task as it is now, read by the server when it asks, with each changed field as
+  before → after (the old value struck through); a new task shows as a card. A message that made changes ends with
+  "N changes applied" and a link per change. Every text in a card is plain text; every link is an in-app path built
+  from an id and checked again in the panel.
+- A task key in an answer (`GEN-1`) is a link with the task's title and status on hover, but only when a card of this
+  conversation named that task; other keys, and keys in code, stay text.
+- A task list the model sees carries `totals` (all, open, done, per project and per status), counted by Orbit, and
+  the model is told to quote them instead of counting.
 - **Follow along** (the eye button, on by default, saved per browser): the page goes to what Ask AI changed or
   opened. Off, the page stays and a "go there" link appears instead. The page never moves while you type in a field
   or have a dialog open.
