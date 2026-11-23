@@ -12,7 +12,8 @@
 //   (a structured change, which "Allow in this chat" may cover); "move GEN-2 to In Progress": get_task,
 //   list_task_statuses, then update_task (an approval with before → after); "tasks" / "open tasks": list_tasks, then an
 //   answer that quotes the totals Orbit worked out and names a few task keys (chips); "show GEN-1": get_task;
-//   "list docs": list_docs; anything else: an echo.
+//   "list docs": list_docs; "move GEN-2 to In Progress, then keep reading": the change, then get_task again and again
+//   until Orbit's step limit stops the run (its summary card must still show); anything else: an echo.
 
 const port = Number(process.argv[2] ?? 18_960)
 /** Optional pause before each answer (ms), so a recording looks like a real model at work. */
@@ -81,7 +82,10 @@ function firstId(value: unknown): string | undefined {
 
 function answer(messages: Message[]): Response {
   const userTexts = messages.filter((m) => m.role === 'user').flatMap((m) => (typeof m.content === 'string' ? [m.content] : m.content.filter((b) => b.type === 'text').map((b) => b.text ?? '')))
-  const asked = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  // "…, then keep reading": after the change, read on until the step limit
+  const keepReading = /,?\s*then keep reading\.?$/i.test(typed)
+  const asked = typed.replace(/,?\s*then keep reading\.?$/i, '')
   const last = messages[messages.length - 1]
   const results = typeof last.content === 'string' ? [] : last.content.filter((b) => b.type === 'tool_result')
   const previous = messages[messages.length - 2]
@@ -91,6 +95,9 @@ function answer(messages: Message[]): Response {
     const name = calledName(result.tool_use_id)
     const content = result.content ?? ''
     if (/declined/i.test(content)) return say('OK, I did not create it.')
+    const changed = resultOf(messages, 'update_task')
+    const reading = asked.match(/move ([A-Z][A-Z0-9]*-\d+) to /i)
+    if (keepReading && changed && reading) return call('get_task', { task_id: reading[1].toUpperCase() }, 'Reading it once more.')
     // "Move ENG-2 to In Progress": read the task, read its project's statuses, change the status with a card
     const move = asked.match(/move ([A-Z][A-Z0-9]*-\d+) to (.+?)\.?$/i)
     if (move) {
