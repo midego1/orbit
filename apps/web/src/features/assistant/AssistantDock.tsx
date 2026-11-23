@@ -9,6 +9,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { useCommand } from '@/shortcuts/useCommand'
 import { useWorkspace } from '@/features/workspaces/workspaceContext'
 import { assistantUi, useAssistantUi } from './assistantStore'
+import { AssistantStateEdge } from './AssistantRunIndicators'
 
 // its own chunk: the AG-UI runtime is most of its size
 const AssistantPanel = lazy(() => import('./AssistantPanel'))
@@ -40,7 +41,16 @@ function PanelLoader() {
 }
 
 export function AssistantDock() {
-  const { open, wide } = useAssistantUi()
+  return (
+    <>
+      <AssistantStateEdge />
+      <Dock />
+    </>
+  )
+}
+
+function Dock() {
+  const { open, wide, run } = useAssistantUi()
   const desktop = useSyncExternalStore(subscribeDesktop, isDesktop)
   // mounted from the first open on, so a closed column keeps its running answer
   const [opened, setOpened] = useState(open)
@@ -53,6 +63,7 @@ export function AssistantDock() {
     return (
       <aside
         data-assistant
+        data-assistant-state={run.state}
         className={cn(
           'flex min-h-0 shrink-0 overflow-hidden border-l bg-background min-[900px]:floating:rounded-lg min-[900px]:floating:border',
           !open ? 'hidden' : wide ? 'w-1/2 min-w-[400px]' : 'w-[400px]',
@@ -64,7 +75,7 @@ export function AssistantDock() {
   }
   return (
     <SideSheet open={open} onOpenChange={(next) => (next ? assistantUi.open() : assistantUi.close())}>
-      <SideSheetContent side="right" data-assistant aria-label="Ask AI" className="z-[41] w-full overflow-hidden border-l bg-background pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] sm:max-w-[420px]">
+      <SideSheetContent side="right" data-assistant data-assistant-state={run.state} aria-label="Ask AI" className="z-[41] w-full overflow-hidden border-l bg-background pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] sm:max-w-[420px]">
         <PanelLoader />
       </SideSheetContent>
     </SideSheet>

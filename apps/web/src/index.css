@@ -755,3 +755,102 @@ html .bn-mobile-formatting-toolbar {
   margin: revert-layer;
   padding: revert-layer;
 }
+
+/*
+ * Ask AI's state colours (features/assistant/assistantRunState.ts): a thin edge around the window and the panel, the
+ * panel's status line, and the approval card. Tune the colours here only. thinking: Orbit's chart blue, a slow pulse;
+ * changing: amber, while an approved change runs; waiting: violet, steady, and the page dims a little. The edge and
+ * the dim never take clicks. Every state also has an icon and a text in the panel: colour is never the only sign.
+ */
+:root {
+  --assistant-thinking: var(--chart-2);
+  --assistant-changing: oklch(0.666 0.179 58.318);
+  --assistant-waiting: oklch(0.541 0.281 293.009);
+  --assistant-dim: oklch(0 0 0 / 5%);
+}
+.dark {
+  --assistant-thinking: var(--chart-1);
+  --assistant-changing: oklch(0.828 0.189 84.429);
+  --assistant-waiting: oklch(0.702 0.183 293.541);
+  --assistant-dim: oklch(0 0 0 / 25%);
+}
+
+[data-assistant-state] {
+  --assistant-tone: transparent;
+}
+[data-assistant-state='thinking'] {
+  --assistant-tone: var(--assistant-thinking);
+}
+[data-assistant-state='changing'] {
+  --assistant-tone: var(--assistant-changing);
+}
+[data-assistant-state='waiting'] {
+  --assistant-tone: var(--assistant-waiting);
+}
+
+[data-assistant-edge] {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow:
+    inset 0 0 0 2px var(--assistant-tone),
+    inset 0 0 28px -10px var(--assistant-tone);
+  transition: opacity 300ms var(--ease-out, ease-out);
+}
+[data-assistant-edge]:not([data-assistant-state='idle']) {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-assistant-edge][data-motion='pulse'] {
+    animation: assistant-edge-pulse 2.8s ease-in-out infinite;
+  }
+}
+@keyframes assistant-edge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* under the panel (which rises above it while waiting) and every menu or dialog: the page stays usable */
+[data-assistant-dim] {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  background: var(--assistant-dim);
+  opacity: 0;
+  transition: opacity 200ms var(--ease-out, ease-out);
+}
+[data-assistant-dim][data-assistant-state='waiting'] {
+  opacity: 1;
+}
+aside[data-assistant][data-assistant-state='waiting'] {
+  position: relative;
+  z-index: 31;
+}
+
+[data-assistant]:not([data-assistant-state='idle']) {
+  border-color: var(--assistant-tone);
+  box-shadow: 0 0 24px -12px var(--assistant-tone);
+}
+[data-assistant-status]:not([data-assistant-state='idle']) {
+  background: color-mix(in oklch, var(--assistant-tone) 10%, transparent);
+}
+[data-assistant-approval] {
+  box-shadow:
+    0 0 0 1.5px var(--assistant-waiting),
+    0 6px 20px -8px color-mix(in oklch, var(--assistant-waiting) 55%, transparent);
+}
+
+@media print {
+  [data-assistant-edge],
+  [data-assistant-dim] {
+    display: none;
+  }
+}

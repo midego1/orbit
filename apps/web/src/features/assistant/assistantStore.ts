@@ -2,8 +2,7 @@
 // whether it is open or widened, whether the page follows along, and what the assistant is doing. The conversation
 // itself lives on the server and in the panel's AG-UI runtime, not here.
 import { useSyncExternalStore } from 'react'
-
-export type AssistantActivity = 'working' | 'waiting' | null
+import { IDLE_RUN, type AssistantRun } from './assistantRunState'
 
 export type AssistantUi = {
   open: boolean
@@ -11,7 +10,8 @@ export type AssistantUi = {
   wide: boolean
   /** The page moves to what Ask AI works on (saved per browser). */
   follow: boolean
-  activity: AssistantActivity
+  /** What Ask AI is doing (assistantRunState.ts): the page edge, the panel's status line and the tab title follow it. */
+  run: AssistantRun
   /** Bumped on every open, so the panel focuses its input again. */
   focusToken: number
 }
@@ -42,7 +42,7 @@ function initial(): AssistantUi {
     open: read('sessionStorage', OPEN_KEY) === 'true',
     wide: read('localStorage', WIDE_KEY) === 'true',
     follow: read('localStorage', FOLLOW_KEY) !== 'false',
-    activity: null,
+    run: IDLE_RUN,
     focusToken: 0,
   }
 }
@@ -76,7 +76,9 @@ export const assistantUi = {
   toggle: () => (state.open ? update({ open: false }) : update({ open: true, focusToken: state.focusToken + 1 })),
   setWide: (wide: boolean) => update({ wide }),
   setFollow: (follow: boolean) => update({ follow }),
-  setActivity: (activity: AssistantActivity) => update({ activity }),
+  setRun: (run: AssistantRun) => {
+    if (run.state !== state.run.state || run.text !== state.run.text) update({ run })
+  },
   /** Tests only. */
   reset: () => {
     state = initial()
