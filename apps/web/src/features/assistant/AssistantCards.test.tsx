@@ -112,3 +112,19 @@ test('the counts line says how many of the counted tasks are listed, and leaves 
   const unknown = card({ tasks: 2, open: null, done: null, complete: true, shown: 2 })
   expect(unknown?.kind === 'tasks' && totalsLine(unknown)).toBe('2 tasks')
 })
+
+test('a group header says "N of M" when the server counted more tasks than the card lists', () => {
+  const card = readCard(
+    {
+      card: {
+        kind: 'tasks',
+        totals: { tasks: 40, open: 40, done: 0, complete: true, shown: 3, byStatus: [], byProject: [{ name: 'Launch', key: 'LCH', count: 30 }, { name: 'General', key: 'GEN', count: 10 }] },
+        items: [task(1), task(2), task(1, 'GEN')],
+      },
+    },
+    'list_tasks',
+  ) as CardData
+  const view = show(<ResultCard card={card} />)
+  expect(view.getByText('Launch').closest('p')?.textContent).toBe('Launch2 of 30')
+  expect(view.getByText('General').closest('p')?.textContent).toBe('General1 of 10')
+})

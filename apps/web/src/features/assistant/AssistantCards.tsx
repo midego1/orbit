@@ -126,7 +126,8 @@ export function TaskListCard({ card }: { card: TasksCardData }) {
         <div key={group.label} className="flex flex-col">
           <p className="flex items-center gap-1.5 px-1.5 pt-1.5 pb-0.5 text-[0.6875rem] font-medium text-foreground">
             {group.label}
-            <span className="text-muted-foreground tabular-nums">{group.count}</span>
+            {/* "12 of 30": the card lists fewer of this group than the server counted */}
+            <span className="text-muted-foreground tabular-nums">{group.count > group.tasks.length ? `${group.tasks.length} of ${group.count}` : group.count}</span>
           </p>
           <ul className="flex flex-col">
             {group.shown.map((task) => (
