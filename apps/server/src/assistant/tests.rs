@@ -2518,3 +2518,90 @@ async fn a_create_preview_names_assignees_and_strips_bidi_controls() {
     assert_eq!(task["title"], "Pay fdp.exe");
     assert_eq!(task["assignees"], json!([{"name": "Grace Hopper"}]));
 }
+
+#[tokio::test]
+async fn the_totals_of_a_task_list_count_every_page_in_the_database() {
+    use crate::mcp::TaskTools;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let principal = super::principal(&database, w.workspace, Id::new_v7(), w.owner)
+        .await
+        .unwrap();
+    let tools = super::SessionTools {
+        tools: TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        principal,
+    };
+    let statuses = tools
+        .call(
+            "list_task_statuses",
+            json!({"project_id": w.project.to_string()}),
+        )
+        .await
+        .unwrap();
+    let status = |category: &str| {
+        statuses["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|status| status["category"] == category)
+            .map(|status| status["id"].as_str().unwrap().to_owned())
+            .expect("a status of the category")
+    };
+    let (open, done) = (status("unstarted"), status("completed"));
+    for (n, status) in [(1, &open), (2, &open), (3, &open), (4, &done), (5, &done)] {
+        tools
+            .call(
+                "create_task",
+                json!({"project_id": w.project.to_string(), "status_id": status, "title": format!("Count me {n}")}),
+            )
+            .await
+            .unwrap();
+    }
+    tools
+        .call(
+            "create_task",
+            json!({"project_id": w.project.to_string(), "status_id": open, "title": "Something else"}),
+        )
+        .await
+        .unwrap();
+    // a page of two out of five matches
+    let input = json!({"query": "Count me", "limit": 2});
+    let mut value = tools.call("list_tasks", input.clone()).await.unwrap();
+    assert_eq!(value["items"].as_array().unwrap().len(), 2);
+    let card = super::cards::read_card(
+        &super::cards::Names::default(),
+        &tools,
+        "list_tasks",
+        &input,
+        &mut value,
+        w.workspace,
+    )
+    .await
+    .unwrap();
+    let totals = &card["totals"];
+    assert_eq!(totals["tasks"], 5);
+    assert_eq!(totals["open"], 3);
+    assert_eq!(totals["done"], 2);
+    assert_eq!(totals["shown"], 2);
+    assert_eq!(totals["complete"], true);
+    assert_eq!(totals["byProject"][0]["name"], "General");
+    assert_eq!(
+        value["totals"]["tasks"], 5,
+        "the model gets the same counts"
+    );
+    // the count keeps to the token's access: another workspace's id is refused, not counted
+    assert!(
+        tools
+            .lookup(
+                super::cards::COUNT_TASKS,
+                json!({"project_id": Id::new_v7().to_string()})
+            )
+            .await
+            .is_err()
+    );
+}
