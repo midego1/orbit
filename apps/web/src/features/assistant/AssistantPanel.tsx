@@ -22,11 +22,14 @@ import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { renderMarkdownBlocks } from '@/lib/markdown'
+import { MarkdownTextContext } from '@/lib/markdownTextContext'
 import { useWorkspace } from '@/features/workspaces/workspaceContext'
 import { useAllStatuses, useProjects } from '@/features/tasks/api/projects'
 import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
+import { PreviewCard, ResultCard, SummaryCard, taskChipRun } from './AssistantCards'
+import { knownTasks, readCard, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
 
 const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
@@ -408,6 +411,10 @@ function AnswerText({ text }: { text: string }) {
     return last?.type === 'text' && last.text === text
   })
   const [copied, setCopied] = useState(false)
+  // task keys link only when this conversation's cards named them (never a key the model made up)
+  const messages = useAuiState((s) => s.thread.messages)
+  const known = useMemo(() => knownTasks(messages), [messages])
+  const textRun = useMemo(() => taskChipRun(known), [known])
   async function copy() {
     try {
       await navigator.clipboard.writeText(text)
@@ -420,7 +427,7 @@ function AnswerText({ text }: { text: string }) {
   return (
     <div className="group/answer flex min-w-0 flex-col">
       {/* answers never load images from other sites and never run diagrams (the model's text is not trusted) */}
-      <div className="text-[0.8125rem] leading-relaxed break-words text-foreground [&_p]:my-1">{renderMarkdownBlocks(text, 'ask-ai', [], { noExternalImages: true })}</div>
+      <div className="text-[0.8125rem] leading-relaxed break-words text-foreground [&_p]:my-1"><MarkdownTextContext value={textRun}>{renderMarkdownBlocks(text, 'ask-ai', [], { noExternalImages: true })}</MarkdownTextContext></div>
       {!running && final ? (
         <div className="-ml-1.5 flex">
           <Tip label={copied ? 'Copied' : 'Copy'}>
@@ -473,10 +480,14 @@ function Step(props: ToolCallMessagePartProps) {
   // the server's interrupt says how risky the change is and whether "Allow in this chat" may be offered
   const interrupt = useAgUiInterrupts().find((entry) => entry.toolCallId === props.toolCallId)
   const view = describeStep(toolName, args, names, interrupt?.metadata?.risk)
+  // the server's card of this result (or the summary at the end of a message), never built from the model's text
+  const card = outcome === 'done' ? readCard(result) : null
+  if (toolName === SUMMARY_TOOL) return card?.kind === 'summary' ? <SummaryCard card={card} /> : null
   if (outcome === 'waiting') {
     return (
       <ApprovalCard
         view={view}
+        preview={readPreview(interrupt?.metadata?.preview)}
         allowable={interrupt?.metadata?.allowForConversation === true && view.risk === 'write'}
         onDecide={(approved, forChat) => void respondToApproval(forChat ? { approved, reason: 'allow_for_conversation' } : { approved })}
       />
@@ -485,7 +496,7 @@ function Step(props: ToolCallMessagePartProps) {
   const linkOnly = outcome === 'done' && notOpened(toolName, result)
   // only a link the server sent back opens a page, never one from the call's own arguments
   const open = outcome === 'done' && result !== null && typeof result === 'object' ? appPath((result as { url?: unknown }).url) : null
-  const line = outcome === 'declined' ? '' : resultLine(result)
+  const line = outcome === 'declined' ? '' : card?.kind === 'tasks' ? (card.totals.tasks === 1 ? '1 result' : `${card.totals.tasks} results`) : resultLine(result)
   const note = line === view.subject || linkOnly ? '' : line
   const isChange = view.risk !== 'read'
   return (
@@ -507,6 +518,11 @@ function Step(props: ToolCallMessagePartProps) {
         ) : null}
       </div>
       {outcome === 'declined' ? <p className="ml-6 text-xs text-muted-foreground">Declined</p> : note && outcome !== 'done' ? <p className={cn('ml-6 text-xs', outcome === 'failed' ? 'text-destructive' : 'text-muted-foreground')}>{note}</p> : null}
+      {card ? (
+        <div className="mt-1.5 ml-6">
+          <ResultCard card={card} />
+        </div>
+      ) : null}
       {/* a change keeps what it was, folded, so the record stays complete */}
       {isChange && outcome !== 'running' && view.fields.length + view.details.length > 0 ? (
         <details className="mt-1 ml-6 text-xs">
@@ -532,7 +548,10 @@ function Fields({ fields, className }: { fields: StepField[]; className?: string
   )
 }
 
-function ApprovalCard({ view, allowable, onDecide }: { view: StepView; allowable: boolean; onDecide: (approved: boolean, forChat?: boolean) => void }) {
+function ApprovalCard({ view, preview, allowable, onDecide }: { view: StepView; preview: ApprovalPreview | null; allowable: boolean; onDecide: (approved: boolean, forChat?: boolean) => void }) {
+  // with a preview, the full arguments stay under Details
+  const fields = preview ? [] : view.fields
+  const details = preview ? [...view.fields, ...view.details] : view.details
   const dangerous = view.risk === 'dangerous'
   return (
     <section aria-label={`Approve: ${view.title}`} className="flex flex-col rounded-lg bg-card shadow-[0_0_0_1px_var(--border)]">
@@ -543,11 +562,12 @@ function ApprovalCard({ view, allowable, onDecide }: { view: StepView; allowable
         </p>
       </header>
       <div className="flex flex-col gap-1.5 rounded-b-lg border-t bg-background px-3 py-2.5">
-        {view.fields.length ? <Fields fields={view.fields} /> : null}
-        {view.details.length ? (
+        {preview ? <PreviewCard preview={preview} /> : null}
+        {fields.length ? <Fields fields={fields} /> : null}
+        {details.length ? (
           <details className="text-xs">
             <summary className="cursor-pointer text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground">Details</summary>
-            <Fields fields={view.details} className="mt-1" />
+            <Fields fields={details} className="mt-1" />
           </details>
         ) : null}
         <div className="flex flex-wrap items-center gap-1.5 pt-1">
