@@ -70,10 +70,16 @@ pub(crate) async fn github_connection(
     match app_client(&state, &workspace_id).await {
         Ok(_) => {}
         Err(TokenError::AppMissing) => {
-            return Ok(Json(GithubConnection { status: "unavailable", login: None }));
+            return Ok(Json(GithubConnection {
+                status: "unavailable",
+                login: None,
+            }));
         }
         Err(TokenError::NeedsRecreate) => {
-            return Ok(Json(GithubConnection { status: "needs_recreate", login: None }));
+            return Ok(Json(GithubConnection {
+                status: "needs_recreate",
+                login: None,
+            }));
         }
         Err(error) => return Err(error.into_api(id)),
     }
@@ -86,9 +92,16 @@ pub(crate) async fn github_connection(
     .await
     .map_err(|_| ApiError::internal(id))?;
     Ok(Json(match row {
-        None => GithubConnection { status: "disconnected", login: None },
+        None => GithubConnection {
+            status: "disconnected",
+            login: None,
+        },
         Some(row) => GithubConnection {
-            status: if row.get::<i64, _>("broken") == 0 { "connected" } else { "broken" },
+            status: if row.get::<i64, _>("broken") == 0 {
+                "connected"
+            } else {
+                "broken"
+            },
             login: Some(row.get("login")),
         },
     }))
@@ -152,13 +165,18 @@ pub(crate) async fn start_github_connection(
     let origin = client
         .callback_origin
         .unwrap_or_else(|| state.public_origin().to_owned());
-    let url = state.github_client().ok_or_else(|| ApiError::internal(id))?.authorize_url(
-        &client.client_id,
-        &callback_url(&origin),
-        &token,
-        &pkce_challenge(&verifier),
-    );
-    Ok(Json(GithubConnectUrl { authorize_url: url.to_string() }))
+    let url = state
+        .github_client()
+        .ok_or_else(|| ApiError::internal(id))?
+        .authorize_url(
+            &client.client_id,
+            &callback_url(&origin),
+            &token,
+            &pkce_challenge(&verifier),
+        );
+    Ok(Json(GithubConnectUrl {
+        authorize_url: url.to_string(),
+    }))
 }
 
 #[utoipa::path(delete, path = "/api/v1/workspaces/{workspace_id}/github/me", params(("workspace_id" = String, Path)), responses((status = 204, description = "Disconnected")))]
@@ -202,7 +220,10 @@ impl Return {
                 let separator = if url.contains('?') { '&' } else { '?' };
                 format!("{url}{separator}{query}")
             }
-            _ => format!("{}/profile/github?{query}", self.origin.trim_end_matches('/')),
+            _ => format!(
+                "{}/profile/github?{query}",
+                self.origin.trim_end_matches('/')
+            ),
         };
         Redirect::to(&url)
     }
@@ -225,15 +246,21 @@ pub(crate) async fn github_connection_callback(
         return_url: None,
         origin: state.public_origin().to_owned(),
     };
-    let code = query.code.filter(|code| !code.is_empty() && code.len() <= 200);
-    let token = query.state.filter(|token| !token.is_empty() && token.len() <= 200);
+    let code = query
+        .code
+        .filter(|code| !code.is_empty() && code.len() <= 200);
+    let token = query
+        .state
+        .filter(|token| !token.is_empty() && token.len() <= 200);
     let (Some(code), Some(token)) = (code, token) else {
         return fallback.to("github=failed");
     };
     match keep_code(&state, &token, &code).await {
         Some((back, finish)) => {
             let workspace = back.workspace.clone().unwrap_or_default();
-            back.to(&format!("github=finish&token={finish}&workspace={workspace}"))
+            back.to(&format!(
+                "github=finish&token={finish}&workspace={workspace}"
+            ))
         }
         None => fallback.to("github=failed"),
     }
@@ -366,7 +393,10 @@ pub(crate) async fn finish_github_connection(
     let origin: Option<String> = row.get("callback_origin");
     let origin = origin.unwrap_or_else(|| state.public_origin().to_owned());
     match finish(&state, &workspace_id, &user, &verifier, &code, &origin).await {
-        Ok(login) => Ok(Json(GithubConnection { status: "connected", login: Some(login) })),
+        Ok(login) => Ok(Json(GithubConnection {
+            status: "connected",
+            login: Some(login),
+        })),
         Err(Outcome::Taken) => Err(ApiError::new(
             StatusCode::CONFLICT,
             "github_account_taken",
@@ -398,7 +428,9 @@ async fn finish(
     origin: &str,
 ) -> Result<String, Outcome> {
     let key = state.encryption_key().ok_or(Outcome::Failed)?;
-    let client = app_client(state, workspace).await.map_err(|_| Outcome::Failed)?;
+    let client = app_client(state, workspace)
+        .await
+        .map_err(|_| Outcome::Failed)?;
     let github = state.github_client().ok_or(Outcome::Failed)?;
     let redirect = callback_url(origin);
     let tokens = github
@@ -428,14 +460,13 @@ async fn finish(
         .immediate_transaction()
         .await
         .map_err(|_| Outcome::Failed)?;
-    let member: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM memberships WHERE workspace_id = $1 AND user_id = $2",
-    )
-    .bind(workspace.to_string())
-    .bind(user.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| Outcome::Failed)?;
+    let member: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM memberships WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace.to_string())
+            .bind(user.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Outcome::Failed)?;
     if member.is_none() {
         return Err(Outcome::Failed);
     }

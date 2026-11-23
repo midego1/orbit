@@ -1660,7 +1660,9 @@ fn problem_responses(operation_id: &str) -> BTreeMap<&'static str, String> {
             add_code(&mut responses, "429", "github_rate_limited");
             add_code(&mut responses, "502", "github_unavailable");
             match operation_id {
-                "create_github_review_comment" | "reply_github_review_thread" | "update_github_review_comment" => {
+                "create_github_review_comment"
+                | "reply_github_review_thread"
+                | "update_github_review_comment" => {
                     add_code(&mut responses, "422", "invalid_review_comment");
                     if operation_id == "create_github_review_comment" {
                         add_code(&mut responses, "409", "pull_head_changed");
@@ -1677,7 +1679,9 @@ fn problem_responses(operation_id: &str) -> BTreeMap<&'static str, String> {
                     add_code(&mut responses, "422", "invalid_merge");
                     add_code(&mut responses, "422", "merge_blocked");
                 }
-                "delete_github_pull_branch" => add_code(&mut responses, "422", "branch_not_deletable"),
+                "delete_github_pull_branch" => {
+                    add_code(&mut responses, "422", "branch_not_deletable")
+                }
                 _ => {}
             }
         }

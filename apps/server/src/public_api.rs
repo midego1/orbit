@@ -466,9 +466,12 @@ impl Responder {
                 "Workspace action forbidden",
                 detail,
             ),
-            TokenApiError::TooLarge { code, detail } => {
-                self.problem(StatusCode::PAYLOAD_TOO_LARGE, code, "Upload too large", detail)
-            }
+            TokenApiError::TooLarge { code, detail } => self.problem(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                code,
+                "Upload too large",
+                detail,
+            ),
             TokenApiError::Internal(_) => Problem::internal(&self.request_id, &self.instance),
             TokenApiError::Task(error) => self.task_problem(error),
             TokenApiError::Page(error) => self.page_problem(error),
@@ -1227,7 +1230,8 @@ struct MoveDocBody {
     private: Option<bool>,
     /// Index among the new siblings, from 0. Omitted, or past the last sibling, puts the doc
     /// last. A doc that enters a database always goes last.
-    position: Option<u64>,    /// `true` checks the move and returns the doc as it would be, with `dropped_values`, but
+    position: Option<u64>,
+    /// `true` checks the move and returns the doc as it would be, with `dropped_values`, but
     /// changes nothing. `version` stays the current one.
     #[serde(default)]
     dry_run: bool,

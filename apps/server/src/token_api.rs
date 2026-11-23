@@ -58,18 +58,18 @@ mod trash;
 mod views;
 pub use comments::{DocComment, DocThread, Person};
 pub use context::{TaskActivity, TeamspaceView};
+pub use databases::{DatabaseRowPatch, LinkedDatabase, NewDatabase, NewDatabaseRow};
+pub use doc_actions::TeamspacePatch;
 pub use files::{
     FileDownload, MAX_INLINE_DOWNLOAD_BYTES, TokenFile, TokenPageFile, too_large, upload_error,
 };
-pub use notifications::NotificationView;
-pub use databases::{DatabaseRowPatch, LinkedDatabase, NewDatabase, NewDatabaseRow};
-pub use doc_actions::TeamspacePatch;
 pub use mail::{
     MailAttachment, MailAttachmentInfo, MailContactView, MailDraftCheck, MailDraftFileView,
     MailDraftView, MailFromAddressView, MailLabelView, MailOutboundItemView, MailOutboundView,
     MailSent, MailSettingsView, MailSignatureView, MailSnippetView, MailSuppressedView,
     MailVacationView, MailboxView, mail_refusal,
 };
+pub use notifications::NotificationView;
 pub use plan::{NOON_MS, parse_plan_time};
 pub use projects::{BulkTaskUpdate, BulkTasks, CycleMove, ReorderItem};
 pub use setup::StatusPatch;
@@ -632,7 +632,8 @@ pub struct DocMove {
     /// Root moves only: `true` moves the doc to the token creator's private space.
     pub private: Option<bool>,
     /// Index among the new siblings; `None` puts the doc last.
-    pub position: Option<u64>,    /// Checks the move and counts `dropped_values`, then changes nothing.
+    pub position: Option<u64>,
+    /// Checks the move and counts `dropped_values`, then changes nothing.
     pub dry_run: bool,
 }
 

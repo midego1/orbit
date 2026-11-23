@@ -287,9 +287,20 @@ async fn replay_names_the_pull_requests_that_changed_on_github() {
         let db = &db;
         async move {
             let mut tx = db.pool().begin().await.unwrap();
-            audit::record(&mut tx, workspace, None, "github.pull.changed", AuditOutcome::Success, resource, None, "test", metadata, TimestampMillis::now())
-                .await
-                .unwrap();
+            audit::record(
+                &mut tx,
+                workspace,
+                None,
+                "github.pull.changed",
+                AuditOutcome::Success,
+                resource,
+                None,
+                "test",
+                metadata,
+                TimestampMillis::now(),
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
         }
     };
@@ -298,7 +309,10 @@ async fn replay_names_the_pull_requests_that_changed_on_github() {
     record("github_pull", serde_json::json!({ "pull": "acme/repo#12" })).await;
     record("github_pull", serde_json::json!({ "pull": "acme/other#3" })).await;
     let events = replay(&db, workspace, Some(0)).await.unwrap();
-    assert_eq!(events.github_pulls, vec!["acme/other#3".to_owned(), "acme/repo#12".to_owned()]);
+    assert_eq!(
+        events.github_pulls,
+        vec!["acme/other#3".to_owned(), "acme/repo#12".to_owned()]
+    );
     assert!(events.github_only);
     assert!(!events.views_only);
     record("task", serde_json::json!({})).await;

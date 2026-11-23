@@ -52,9 +52,7 @@ mod unique_id;
 mod values;
 mod view_config;
 mod views;
-pub use agent::{
-    AgentDatabase, AgentQuery, AgentRow, AgentRowPage, AgentTemplate, invalid_detail,
-};
+pub use agent::{AgentDatabase, AgentQuery, AgentRow, AgentRowPage, AgentTemplate, invalid_detail};
 pub use agent_schema::AgentPropertyChanges;
 pub use agent_views::{AgentPropertySpec, AgentViewChanges, AgentViewDetail, AgentViewSpec};
 pub use buttons::{ButtonAction, ButtonConfig, ButtonPress, CreatedRow, MAX_ACTIONS};

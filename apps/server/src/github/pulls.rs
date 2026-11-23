@@ -32,7 +32,10 @@ impl PullRef {
     }
 
     fn rest(&self, rest: &str) -> String {
-        format!("repos/{}/{}/pulls/{}{rest}", self.owner, self.repo, self.number)
+        format!(
+            "repos/{}/{}/pulls/{}{rest}",
+            self.owner, self.repo, self.number
+        )
     }
 
     fn variables(&self) -> Value {
@@ -314,7 +317,10 @@ fn search_query(repository: &str, label: Option<&str>, filter: PullFilter, text:
         .to_owned(),
     );
     // Free text only: a qualifier (`repo:`, `org:`, `-repo:`…) could widen the search past this repository.
-    let words: Vec<&str> = text.split_whitespace().filter(|word| !word.contains(':')).collect();
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter(|word| !word.contains(':'))
+        .collect();
     let text = words.join(" ");
     if !text.is_empty() {
         parts.push(text.chars().take(200).collect());
@@ -397,7 +403,9 @@ const DETAIL_QUERY: &str = "query PullDetail($owner: String!, $repo: String!, $n
 fn check_state(value: &str) -> &'static str {
     match value.to_ascii_uppercase().as_str() {
         "SUCCESS" => "success",
-        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => "failure",
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            "failure"
+        }
         "NEUTRAL" | "SKIPPED" | "STALE" => "neutral",
         _ => "pending",
     }
@@ -458,8 +466,14 @@ fn blocked_reason(status: &str, draft: bool) -> Option<String> {
     Some(reason.to_owned())
 }
 
-pub async fn detail(github: &GithubClient, token: &str, pull: &PullRef) -> Result<PullDetail, GithubError> {
-    let data: Value = github.graphql(token, DETAIL_QUERY, pull.variables()).await?;
+pub async fn detail(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<PullDetail, GithubError> {
+    let data: Value = github
+        .graphql(token, DETAIL_QUERY, pull.variables())
+        .await?;
     let repo = &data["repository"];
     let pr = &repo["pullRequest"];
     if pr.is_null() {
@@ -534,7 +548,11 @@ const FILES_QUERY: &str = "query PullFiles($owner: String!, $repo: String!, $num
   } }
 }";
 
-pub async fn files(github: &GithubClient, token: &str, pull: &PullRef) -> Result<Vec<PullFile>, GithubError> {
+pub async fn files(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<Vec<PullFile>, GithubError> {
     let mut viewed = std::collections::HashSet::new();
     let mut after = Value::Null;
     for _ in 0..MAX_FILE_PAGES {
@@ -542,7 +560,11 @@ pub async fn files(github: &GithubClient, token: &str, pull: &PullRef) -> Result
         variables["after"] = after.clone();
         let data: Value = github.graphql(token, FILES_QUERY, variables).await?;
         let files = &data["repository"]["pullRequest"]["files"];
-        for node in files["nodes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        for node in files["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
             if node["viewerViewedState"] == "VIEWED" {
                 viewed.insert(text(&node["path"]));
             }
@@ -555,7 +577,12 @@ pub async fn files(github: &GithubClient, token: &str, pull: &PullRef) -> Result
     let mut result = Vec::new();
     for page in 1..=MAX_FILE_PAGES {
         let reply: Vec<Value> = github
-            .rest(token, Method::GET, &pull.rest(&format!("/files?per_page=100&page={page}")), None)
+            .rest(
+                token,
+                Method::GET,
+                &pull.rest(&format!("/files?per_page=100&page={page}")),
+                None,
+            )
             .await?;
         let count = reply.len();
         result.extend(reply.into_iter().map(|file| {
@@ -587,13 +614,22 @@ pub async fn contents(
 ) -> Result<FileContents, GithubError> {
     let encoded: Vec<String> = path
         .split('/')
-        .map(|segment| url::form_urlencoded::byte_serialize(segment.as_bytes()).collect::<String>().replace('+', "%20"))
+        .map(|segment| {
+            url::form_urlencoded::byte_serialize(segment.as_bytes())
+                .collect::<String>()
+                .replace('+', "%20")
+        })
         .collect();
     let reply: Value = github
         .rest(
             token,
             Method::GET,
-            &format!("repos/{}/{}/contents/{}?ref={sha}", pull.owner, pull.repo, encoded.join("/")),
+            &format!(
+                "repos/{}/{}/contents/{}?ref={sha}",
+                pull.owner,
+                pull.repo,
+                encoded.join("/")
+            ),
             None,
         )
         .await?;
@@ -604,7 +640,9 @@ pub async fn contents(
     let raw: String = text(&reply["content"]).split_whitespace().collect();
     let bytes = STANDARD.decode(raw).unwrap_or_default();
     // A NUL byte marks a binary file, as git does.
-    let text = String::from_utf8(bytes).ok().filter(|text| !text.contains('\0'));
+    let text = String::from_utf8(bytes)
+        .ok()
+        .filter(|text| !text.contains('\0'));
     Ok(FileContents { text })
 }
 
@@ -635,7 +673,11 @@ const THREADS_QUERY: &str = concat!(
     "  } }\n}"
 );
 
-pub async fn threads(github: &GithubClient, token: &str, pull: &PullRef) -> Result<Vec<ReviewThread>, GithubError> {
+pub async fn threads(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<Vec<ReviewThread>, GithubError> {
     let mut threads = Vec::new();
     let mut after = Value::Null;
     for _ in 0..MAX_FILE_PAGES {
@@ -643,7 +685,11 @@ pub async fn threads(github: &GithubClient, token: &str, pull: &PullRef) -> Resu
         variables["after"] = after.clone();
         let data: Value = github.graphql(token, THREADS_QUERY, variables).await?;
         let page = &data["repository"]["pullRequest"]["reviewThreads"];
-        for node in page["nodes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        for node in page["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
             threads.push(review_thread(node));
         }
         if page["pageInfo"]["hasNextPage"] != true {
@@ -702,7 +748,9 @@ pub async fn conversation(
     token: &str,
     pull: &PullRef,
 ) -> Result<Vec<PullTimelineItem>, GithubError> {
-    let data: Value = github.graphql(token, CONVERSATION_QUERY, pull.variables()).await?;
+    let data: Value = github
+        .graphql(token, CONVERSATION_QUERY, pull.variables())
+        .await?;
     let pr = &data["repository"]["pullRequest"];
     let list = |value: &Value| value["nodes"].as_array().cloned().unwrap_or_default();
     let mut items: Vec<PullTimelineItem> = list(&pr["comments"])
@@ -737,8 +785,14 @@ const PULL_ID_QUERY: &str = "query PullId($owner: String!, $repo: String!, $numb
 }";
 
 /// GitHub's node id of the pull request.
-pub async fn node_id(github: &GithubClient, token: &str, pull: &PullRef) -> Result<String, GithubError> {
-    let data: Value = github.graphql(token, PULL_ID_QUERY, pull.variables()).await?;
+pub async fn node_id(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<String, GithubError> {
+    let data: Value = github
+        .graphql(token, PULL_ID_QUERY, pull.variables())
+        .await?;
     data["repository"]["pullRequest"]["id"]
         .as_str()
         .map(str::to_owned)
@@ -772,7 +826,11 @@ pub struct MergeBase {
 }
 
 /// The merge base of the pull request: the old side of its diff (the base branch may have moved on since).
-pub async fn merge_base(github: &GithubClient, token: &str, pull: &PullRef) -> Result<MergeBase, GithubError> {
+pub async fn merge_base(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<MergeBase, GithubError> {
     let detail = detail(github, token, pull).await?;
     let valid = |sha: &str| !sha.is_empty() && sha.bytes().all(|c| c.is_ascii_alphanumeric());
     if !valid(&detail.base_sha) || !valid(&detail.head_sha) {

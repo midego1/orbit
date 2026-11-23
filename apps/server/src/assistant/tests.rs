@@ -186,6 +186,8 @@ fn tool(id: &str, name: &str, input: &Value) -> Reply {
 #[derive(Default)]
 struct FakeTools {
     calls: Mutex<Vec<(String, Value)>>,
+    /// The server's own reads for the cards (`ToolRunner::lookup`), kept apart from the model's calls.
+    lookups: Mutex<Vec<(String, Value)>>,
 }
 
 impl ToolRunner for FakeTools {
@@ -206,10 +208,73 @@ impl ToolRunner for FakeTools {
                 "update_project" => Ok(json!({"id": input["project_id"], "name": input["name"]})),
                 "create_comment" => Ok(json!({"id": "c1", "task_id": input["task_id"]})),
                 "update_doc" => Ok(json!({"id": input["page_id"], "title": "Doc"})),
+                "list_tasks" => Ok(fake_task_list()),
+                "update_task" => Ok(fake_task(
+                    input["task_id"].as_str().unwrap_or("t1"),
+                    7,
+                    "Write the launch post",
+                    input["status_id"].as_str().unwrap_or("s-todo"),
+                )),
                 _ => Err("unknown".into()),
             }
         })
     }
+
+    fn lookup<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            self.lookups
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), input.clone()));
+            match name {
+                "list_projects" => Ok(json!({"items": [
+                    {"id": "p1", "name": "Launch", "key": "LCH"},
+                    {"id": "p2", "name": "General", "key": "GEN"},
+                ]})),
+                "list_task_statuses" => Ok(json!({"items": [
+                    {"id": "s-todo", "name": "Todo", "category": "unstarted", "color": "#94a3b8"},
+                    {"id": "s-doing", "name": "In Progress", "category": "started", "color": "#f59e0b"},
+                    {"id": "s-done", "name": "Done", "category": "completed", "color": "#22c55e"},
+                ], "next_cursor": null})),
+                "list_members" => Ok(json!({"items": [
+                    {"user_id": "u1", "display_name": "Ada <b>Lovelace</b>"},
+                    {"user_id": "u2", "display_name": "Grace Hopper"},
+                ], "next_cursor": null})),
+                "get_task" => Ok(fake_task(
+                    input["task_id"].as_str().unwrap_or("t1"),
+                    7,
+                    "Write the launch post",
+                    "s-todo",
+                )),
+                _ => Err("unknown".into()),
+            }
+        })
+    }
+}
+
+fn fake_task(id: &str, number: i64, title: &str, status: &str) -> Value {
+    json!({
+        "id": id, "project_id": "p1", "status_id": status, "number": number, "identifier": format!("LCH-{number}"),
+        "title": title, "priority": "high", "assignee_ids": ["u1"], "due_at": "2026-11-30T00:00:00.000Z",
+        "url": format!("https://orbit.test/tasks/{id}?workspace=w"),
+    })
+}
+
+/// Six tasks over two projects: LCH has two Todo, one In Progress and one Done; GEN has one Todo and one Done.
+fn fake_task_list() -> Value {
+    let mut items = vec![
+        fake_task("t1", 1, "One", "s-todo"),
+        fake_task("t2", 2, "Two", "s-todo"),
+        fake_task("t3", 3, "Three", "s-doing"),
+        fake_task("t4", 4, "Four", "s-done"),
+    ];
+    for (id, number, title, status) in [("t5", 1, "Five", "s-todo"), ("t6", 2, "Six", "s-done")] {
+        let mut task = fake_task(id, number, title, status);
+        task["project_id"] = json!("p2");
+        task["identifier"] = json!(format!("GEN-{number}"));
+        items.push(task);
+    }
+    json!({"items": items, "next_cursor": null})
 }
 
 impl FakeTools {
@@ -2061,4 +2126,224 @@ async fn a_page_step_says_whether_it_was_opened() {
                 .starts_with("/docs?workspace=")
         );
     }
+}
+
+// ---- cards ----
+
+fn tool_result_content(events: &[Value], call_id: &str) -> Value {
+    let event = events
+        .iter()
+        .find(|event| event["type"] == "TOOL_CALL_RESULT" && event["toolCallId"] == call_id)
+        .expect("a tool result");
+    serde_json::from_str(event["content"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_task_list_carries_exact_totals_for_the_model_and_a_card_for_the_panel() {
+    let harness = Harness::new(vec![
+        tool("toolu_l", "list_tasks", &json!({})),
+        text("You have 6 tasks."),
+    ])
+    .await;
+    let mut state = state();
+    let (outcome, events) = harness.run(&mut state, ask("How many tasks?")).await;
+    assert_eq!(outcome, Outcome::Finished);
+
+    // the model gets the counts, worked out by the server, and is told to quote them
+    let requests = harness.fake.requests();
+    let result = last_tool_result(&requests[1]);
+    let content =
+        result["content"].as_str().unwrap_or_default().to_owned() + &result["content"].to_string();
+    for needle in [
+        r#""tasks":6"#,
+        r#""open":4"#,
+        r#""done":2"#,
+        r#""Launch (LCH)":4"#,
+        r#""General (GEN)":2"#,
+        r#""Todo":3"#,
+        r#""In Progress":1"#,
+        r#""Done":2"#,
+        "quote them",
+    ] {
+        assert!(
+            content.contains(needle) || content.contains(&needle.replace('"', "\\\"")),
+            "{needle} in {content}"
+        );
+    }
+
+    // the panel gets a card built from the same result
+    let card = &tool_result_content(&events, "toolu_l")["card"];
+    assert_eq!(card["kind"], "tasks");
+    assert_eq!(card["totals"]["tasks"], 6);
+    assert_eq!(card["totals"]["open"], 4);
+    assert_eq!(card["totals"]["complete"], true);
+    assert_eq!(
+        card["totals"]["byProject"],
+        json!([{"name": "Launch", "key": "LCH", "count": 4}, {"name": "General", "key": "GEN", "count": 2}])
+    );
+    let first = &card["items"][0];
+    assert_eq!(first["key"], "LCH-1");
+    assert_eq!(
+        first["href"],
+        json!(format!("/tasks/t1?workspace={}", harness.workspace))
+    );
+    assert_eq!(first["status"]["name"], "Todo");
+    assert_eq!(first["status"]["category"], "unstarted");
+    assert_eq!(first["priority"], "high");
+    assert_eq!(first["due"], "2026-11-30");
+    // a member's name stays the plain string it is; the panel never renders it as HTML
+    assert_eq!(first["assignees"][0]["name"], "Ada <b>Lovelace</b>");
+    // names come from the server's own lookups, not from the model's calls
+    assert_eq!(harness.tools.names(), vec!["list_tasks"]);
+    let lookups: Vec<String> = harness
+        .tools
+        .lookups
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert!(lookups.contains(&"list_projects".to_owned()));
+    assert!(lookups.contains(&"list_members".to_owned()));
+}
+
+#[tokio::test]
+async fn an_update_shows_the_current_value_read_by_the_server_next_to_the_new_one() {
+    let args = json!({"task_id": "t7", "status_id": "s-doing", "expected_version": 1});
+    let harness = Harness::new(vec![
+        tool("toolu_u", "update_task", &args),
+        text("Moved LCH-7 to In Progress."),
+    ])
+    .await;
+    let mut state = state();
+    let (outcome, events) = harness.run(&mut state, ask("Start LCH-7")).await;
+    assert_eq!(outcome, Outcome::Paused);
+    assert!(
+        harness.tools.names().is_empty(),
+        "nothing runs before approval"
+    );
+    let interrupt = &events.last().unwrap()["outcome"]["interrupts"][0];
+    let preview = &interrupt["metadata"]["preview"];
+    assert_eq!(preview["kind"], "change");
+    assert_eq!(preview["task"]["key"], "LCH-7");
+    assert_eq!(
+        preview["task"]["href"],
+        json!(format!("/tasks/t7?workspace={}", harness.workspace))
+    );
+    assert_eq!(
+        preview["changes"],
+        json!([{"field": "Status", "before": "Todo", "after": "In Progress"}])
+    );
+    // the before value is the server's own reading of the task, made when the approval was created
+    assert!(
+        harness
+            .tools
+            .lookups
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, input)| name == "get_task" && input["task_id"] == "t7")
+    );
+
+    let pending = state.pending.clone().unwrap();
+    let (outcome, events) = harness
+        .run(
+            &mut state,
+            Input::Resume {
+                interrupt_id: pending.interrupt_id,
+                approved: true,
+                allow_for_conversation: false,
+            },
+        )
+        .await;
+    assert_eq!(outcome, Outcome::Finished);
+    // the message ends with a summary of its changes, one link each
+    let start = events
+        .iter()
+        .find(|event| {
+            event["type"] == "TOOL_CALL_START" && event["toolCallName"] == "orbit_summary"
+        })
+        .expect("a summary step");
+    let summary = &tool_result_content(&events, start["toolCallId"].as_str().unwrap())["card"];
+    assert_eq!(summary["kind"], "summary");
+    assert_eq!(summary["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["changes"][0]["verb"], "Updated");
+    assert_eq!(summary["changes"][0]["key"], "LCH-7");
+    assert_eq!(
+        summary["changes"][0]["href"],
+        json!(format!("/tasks/t7?workspace={}", harness.workspace))
+    );
+    // a reload shows the same summary: it is in the display log
+    assert!(
+        state
+            .display
+            .iter()
+            .any(|message| message.to_string().contains("\\\"summary\\\""))
+    );
+}
+
+#[tokio::test]
+async fn a_create_shows_the_new_task_as_a_card_before_it_is_approved() {
+    let args = json!({"project_id": "p1", "status_id": "s-todo", "title": "<img src=x onerror=alert(1)>", "priority": "urgent", "assignee_ids": ["u2"], "due_at": "2026-12-01"});
+    let harness = Harness::new(vec![tool("toolu_c", "create_task", &args)]).await;
+    let mut state = state();
+    let (outcome, events) = harness.run(&mut state, ask("Add a task")).await;
+    assert_eq!(outcome, Outcome::Paused);
+    let preview = &events.last().unwrap()["outcome"]["interrupts"][0]["metadata"]["preview"];
+    assert_eq!(preview["kind"], "create");
+    let task = &preview["task"];
+    // the title is passed on as the plain string it is
+    assert_eq!(task["title"], "<img src=x onerror=alert(1)>");
+    assert_eq!(task["href"], Value::Null);
+    assert_eq!(task["project"]["key"], "LCH");
+    assert_eq!(task["status"]["name"], "Todo");
+    assert_eq!(task["priority"], "urgent");
+    assert_eq!(task["assignees"], json!([{"name": "Grace Hopper"}]));
+    assert_eq!(task["due"], "2026-12-01");
+}
+
+#[test]
+fn card_links_are_same_origin_paths_built_from_ids() {
+    let workspace = Id::new_v7();
+    assert_eq!(
+        super::cards::task_href(&json!("0193-abc_d"), workspace),
+        Some(format!("/tasks/0193-abc_d?workspace={workspace}"))
+    );
+    for bad in [
+        json!("//evil.example/x"),
+        json!("../admin"),
+        json!("t1?x=1"),
+        json!("https://evil.example"),
+        json!(""),
+        json!(12),
+        Value::Null,
+    ] {
+        assert_eq!(super::cards::task_href(&bad, workspace), None, "{bad}");
+    }
+    assert!(super::cards::is_task_key("GEN-12"));
+    for bad in ["GEN", "GEN-", "GEN-012", "-12", "GE N-1", "GEN-1a"] {
+        assert!(!super::cards::is_task_key(bad), "{bad}");
+    }
+}
+
+#[test]
+fn totals_say_when_more_tasks_match_than_the_page_holds() {
+    let cards = vec![
+        json!({"project": {"name": "Launch", "key": "LCH"}, "status": {"name": "Done", "category": "completed"}}),
+        json!({"project": {"name": "Launch", "key": "LCH"}, "status": {"name": "Todo", "category": "unstarted"}}),
+        json!({"project": null, "status": null}),
+    ];
+    let totals = super::cards::totals(&cards, true);
+    assert_eq!(totals["tasks"], 3);
+    assert_eq!(totals["done"], 1);
+    assert_eq!(totals["open"], 2);
+    assert_eq!(totals["complete"], false);
+    assert_eq!(
+        totals["byProject"][1],
+        json!({"name": "No project", "key": "", "count": 1})
+    );
+    let model = super::cards::totals_for_model(&totals);
+    assert_eq!(model["by_project"]["Launch (LCH)"], 2);
+    assert_eq!(model["by_status"]["No status"], 1);
+    assert_eq!(model["complete"], false);
 }

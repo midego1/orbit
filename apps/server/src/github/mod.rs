@@ -21,7 +21,8 @@ use crate::integration_routes::ApiError;
 
 /// The REST API version Orbit is written against.
 const API_VERSION: &str = "2026-03-10";
-const GRAPHQL_ACCEPT: &str = "application/vnd.github+json, application/vnd.github.merge-info-preview+json";
+const GRAPHQL_ACCEPT: &str =
+    "application/vnd.github+json, application/vnd.github.merge-info-preview+json";
 
 /// Where GitHub is. Production is github.com; tests point both URLs at one local fake.
 #[derive(Clone, Debug)]
@@ -66,7 +67,9 @@ pub enum GithubError {
     NotFound,
     Forbidden(String),
     Unprocessable(String),
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        retry_after_secs: u64,
+    },
     Conflict(String),
     MethodNotAllowed(String),
     Network,
@@ -84,9 +87,7 @@ impl GithubError {
                 "The pull request was not found, or your GitHub account cannot see it.",
                 request_id,
             ),
-            Self::Forbidden(message) if message.is_empty() => {
-                Self::NotFound.into_api(request_id)
-            }
+            Self::Forbidden(message) if message.is_empty() => Self::NotFound.into_api(request_id),
             Self::Unauthorized => ApiError::new(
                 StatusCode::CONFLICT,
                 "github_reconnect",
@@ -372,7 +373,11 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response, GithubE
         .json::<Value>()
         .await
         .ok()
-        .and_then(|body| body.get("message").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|body| {
+            body.get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     Err(match status.as_u16() {
         401 => GithubError::Unauthorized,

@@ -184,7 +184,8 @@ async fn oauth_token(
         }
         state.refresh_users.get(&old).cloned()
     } else {
-        form.get("code").and_then(|code| state.codes.get(code).cloned())
+        form.get("code")
+            .and_then(|code| state.codes.get(code).cloned())
     };
     let Some(user) = user else {
         return Json(json!({ "error": "bad_verification_code" })).into_response();
@@ -244,12 +245,19 @@ async fn api(State(state): State<Shared>, request: Request<Body>) -> Response {
     let mut state = state.lock().unwrap();
     let query = body["query"].as_str().unwrap_or("").to_owned();
     // REST answers are canned; a token GitHub does not know gets 401 everywhere, as on GitHub.
-    let known = auth.is_empty() || state.tokens.contains_key(auth.strip_prefix("Bearer ").unwrap_or(""));
+    let known = auth.is_empty()
+        || state
+            .tokens
+            .contains_key(auth.strip_prefix("Bearer ").unwrap_or(""));
     state
         .api_requests
         .push((method.clone(), with_query.clone(), auth, body));
     if !known {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "message": "Bad credentials" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "message": "Bad credentials" })),
+        )
+            .into_response();
     }
     if path == "graphql" {
         state.graphql_accepts.push(accept);
@@ -268,7 +276,10 @@ async fn api(State(state): State<Shared>, request: Request<Body>) -> Response {
         };
         return match reply {
             Some(body) => Json(body).into_response(),
-            None => Json(json!({ "errors": [{ "type": "NOT_FOUND", "message": "no fake answer" }] })).into_response(),
+            None => {
+                Json(json!({ "errors": [{ "type": "NOT_FOUND", "message": "no fake answer" }] }))
+                    .into_response()
+            }
         };
     }
     let reply = state
@@ -277,10 +288,12 @@ async fn api(State(state): State<Shared>, request: Request<Body>) -> Response {
         .or_else(|| state.api.get(&(method, path.to_owned())))
         .cloned();
     match reply {
-        Some((status, body)) => {
-            (StatusCode::from_u16(status).unwrap(), Json(body)).into_response()
-        }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "message": "Not Found" }))).into_response(),
+        Some((status, body)) => (StatusCode::from_u16(status).unwrap(), Json(body)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Not Found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -360,8 +373,8 @@ pub async fn fixture() -> GithubFixture {
         .unwrap();
     let github = FakeGithub::start().await;
     let state = integration_state(&database, &identity, &github);
-    let app = integration_router(state.clone())
-        .layer(HttpPlatformLayer::new(OriginPolicy::new(ORIGIN)));
+    let app =
+        integration_router(state.clone()).layer(HttpPlatformLayer::new(OriginPolicy::new(ORIGIN)));
     GithubFixture {
         app,
         state,
@@ -530,7 +543,13 @@ impl GithubFixture {
         }
     }
 
-    pub async fn send(&self, method: &str, path: &str, cookie: &str, body: Option<Value>) -> Response {
+    pub async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        cookie: &str,
+        body: Option<Value>,
+    ) -> Response {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
@@ -550,7 +569,10 @@ impl GithubFixture {
             .unwrap()
     }
 
-    pub fn with_requests<R>(&self, read: impl FnOnce(&[(String, String, String, Value)]) -> R) -> R {
+    pub fn with_requests<R>(
+        &self,
+        read: impl FnOnce(&[(String, String, String, Value)]) -> R,
+    ) -> R {
         self.github.with(|state| read(&state.api_requests))
     }
 
@@ -560,7 +582,12 @@ impl GithubFixture {
         let body = body.to_string();
         let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(b"hook-secret").unwrap();
         mac.update(body.as_bytes());
-        let signature: String = mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        let signature: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/integrations/github/webhook")

@@ -227,9 +227,13 @@ fn day(value: &Value) -> Value {
         .filter(|raw| raw.len() >= 10 && raw.is_char_boundary(10))
         .map(|raw| &raw[..10])
         .filter(|date| {
-            date.chars()
-                .enumerate()
-                .all(|(at, c)| if at == 4 || at == 7 { c == '-' } else { c.is_ascii_digit() })
+            date.chars().enumerate().all(|(at, c)| {
+                if at == 4 || at == 7 {
+                    c == '-'
+                } else {
+                    c.is_ascii_digit()
+                }
+            })
         })
         .map_or(Value::Null, |date| json!(date))
 }
@@ -304,7 +308,9 @@ pub(crate) fn is_task_key(key: &str) -> bool {
         return false;
     };
     (1..=20).contains(&project.len())
-        && project.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && project
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !number.is_empty()
         && number.len() <= 15
         && number.chars().all(|c| c.is_ascii_digit())
@@ -323,18 +329,32 @@ pub(crate) fn totals(cards: &[Value], more: bool) -> Value {
     for card in cards {
         let project = &card["project"];
         let (name, key) = (text(&project["name"]), text(&project["key"]));
-        let name = if name.is_empty() { "No project".into() } else { name };
-        match by_project.iter_mut().find(|(n, k, _)| *n == name && *k == key) {
+        let name = if name.is_empty() {
+            "No project".into()
+        } else {
+            name
+        };
+        match by_project
+            .iter_mut()
+            .find(|(n, k, _)| *n == name && *k == key)
+        {
             Some(entry) => entry.2 += 1,
             None => by_project.push((name, key, 1)),
         }
         let status = &card["status"];
         let (name, category) = (text(&status["name"]), text(&status["category"]));
-        let name = if name.is_empty() { "No status".into() } else { name };
+        let name = if name.is_empty() {
+            "No status".into()
+        } else {
+            name
+        };
         if is_done(&category) {
             done += 1;
         }
-        match by_status.iter_mut().find(|(n, c, _)| *n == name && *c == category) {
+        match by_status
+            .iter_mut()
+            .find(|(n, c, _)| *n == name && *c == category)
+        {
             Some(entry) => entry.2 += 1,
             None => by_status.push((name, category, 1)),
         }
@@ -459,7 +479,12 @@ pub(crate) async fn change_card<T: ToolRunner>(
 }
 
 /// One line of the summary of a message's changes: what was done to what, and its page.
-pub(crate) fn change_entry(tool: &str, input: &Value, card: Option<&Value>, href: Option<String>) -> Value {
+pub(crate) fn change_entry(
+    tool: &str,
+    input: &Value,
+    card: Option<&Value>,
+    href: Option<String>,
+) -> Value {
     let verb = match tool {
         "create_task" => "Created".to_owned(),
         "update_task" => "Updated".to_owned(),
@@ -558,8 +583,13 @@ pub(crate) async fn approval_preview<T: ToolRunner>(
                 push("Title", text(&current["title"]), text(&input["title"]));
             }
             if input["priority"].is_string() {
-                let label = |value: &Value| priority_label(priority(value).as_str().unwrap_or("none"));
-                push("Priority", label(&current["priority"]), label(&input["priority"]));
+                let label =
+                    |value: &Value| priority_label(priority(value).as_str().unwrap_or("none"));
+                push(
+                    "Priority",
+                    label(&current["priority"]),
+                    label(&input["priority"]),
+                );
             }
             if input.get("assignee_ids").is_some() {
                 let people = |ids: &Value| {
@@ -575,7 +605,11 @@ pub(crate) async fn approval_preview<T: ToolRunner>(
                         list.join(", ")
                     }
                 };
-                push("Assignees", people(&current["assignee_ids"]), people(&wanted["assignee_ids"]));
+                push(
+                    "Assignees",
+                    people(&current["assignee_ids"]),
+                    people(&wanted["assignee_ids"]),
+                );
             }
             if let Some(due) = input.get("due_at") {
                 let label = |value: &Value| {
@@ -589,9 +623,17 @@ pub(crate) async fn approval_preview<T: ToolRunner>(
                 let clip = |value: &Value| {
                     let full = value.as_str().unwrap_or_default();
                     let cut: String = full.chars().take(200).collect();
-                    if cut.len() < full.len() { format!("{cut}…") } else { cut }
+                    if cut.len() < full.len() {
+                        format!("{cut}…")
+                    } else {
+                        cut
+                    }
                 };
-                push("Description", clip(&current["description"]), clip(&input["description"]));
+                push(
+                    "Description",
+                    clip(&current["description"]),
+                    clip(&input["description"]),
+                );
             }
             Some(json!({"kind": "change", "task": card, "changes": changes}))
         }

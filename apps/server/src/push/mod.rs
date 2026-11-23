@@ -1124,21 +1124,34 @@ impl PushService {
                     subject("page_title"),
                 ),
                 "github_review_requested" | "github_review" | "github_merged" => {
-                    let who: String = row.get::<Option<String>, _>("github_actor_login").unwrap_or_default();
-                    let title = match (row.get::<String, _>("kind").as_str(), row.get::<Option<String>, _>("github_review_state").as_deref()) {
+                    let who: String = row
+                        .get::<Option<String>, _>("github_actor_login")
+                        .unwrap_or_default();
+                    let title = match (
+                        row.get::<String, _>("kind").as_str(),
+                        row.get::<Option<String>, _>("github_review_state")
+                            .as_deref(),
+                    ) {
                         ("github_review_requested", _) => format!("{who} asked for your review"),
                         ("github_merged", _) => format!("{who} merged your pull request"),
                         (_, Some("approved")) => format!("{who} approved your pull request"),
                         (_, Some("changes_requested")) => format!("{who} requested changes"),
                         _ => format!("{who} commented on your pull request"),
                     };
-                    let repository: String = row.get::<Option<String>, _>("github_repository").unwrap_or_default();
-                    let number: i64 = row.get::<Option<i64>, _>("github_pull_number").unwrap_or_default();
+                    let repository: String = row
+                        .get::<Option<String>, _>("github_repository")
+                        .unwrap_or_default();
+                    let number: i64 = row
+                        .get::<Option<i64>, _>("github_pull_number")
+                        .unwrap_or_default();
                     (PushKind::Github, title, format!("{repository}#{number}"))
                 }
                 _ => continue,
             };
-            let url = match (row.get::<Option<String>, _>("github_repository"), row.get::<Option<i64>, _>("github_pull_number")) {
+            let url = match (
+                row.get::<Option<String>, _>("github_repository"),
+                row.get::<Option<i64>, _>("github_pull_number"),
+            ) {
                 (Some(repository), Some(number)) => format!("/tasks/pulls/{repository}/{number}"),
                 _ => "/activity".to_owned(),
             };

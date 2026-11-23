@@ -125,18 +125,16 @@ impl ApiTokenScope {
     #[must_use]
     pub fn valid_combination(scopes: &[Self], service_account: bool) -> bool {
         let export = scopes.iter().any(|scope| scope.is_export());
-        let content = scopes
-            .iter()
-            .any(|scope| {
-                matches!(
-                    scope,
-                    Self::DocsRead
-                        | Self::DocsWrite
-                        | Self::ChatRead
-                        | Self::MailRead
-                        | Self::MailWrite
-                )
-            });
+        let content = scopes.iter().any(|scope| {
+            matches!(
+                scope,
+                Self::DocsRead
+                    | Self::DocsWrite
+                    | Self::ChatRead
+                    | Self::MailRead
+                    | Self::MailWrite
+            )
+        });
         !scopes.is_empty()
             && !(export && (service_account || scopes.len() > 1))
             && !(service_account && content)

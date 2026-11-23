@@ -7,15 +7,18 @@ use serde_json::{Value, json};
 use utoipa::ToSchema;
 
 use super::pulls::{
-    PendingReview, PullRef, ReviewComment, ReviewThread, comment_fields, review_comment, review_thread,
-    thread_fields, threads,
+    PendingReview, PullRef, ReviewComment, ReviewThread, comment_fields, review_comment,
+    review_thread, thread_fields, threads,
 };
 use super::{GithubClient, GithubError};
 
 /// GitHub node ids: letters, digits, `_`, `-` and `=`.
 #[must_use]
 pub fn valid_node_id(id: &str) -> bool {
-    (1..=100).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'='))
+    (1..=100).contains(&id.len())
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'='))
 }
 
 const NODE_PULL: &str = "query NodePull($id: ID!) { node(id: $id) { __typename \
@@ -24,12 +27,21 @@ const NODE_PULL: &str = "query NodePull($id: ID!) { node(id: $id) { __typename \
 
 /// Whether a review comment or thread (a node id from the client) belongs to this pull request. Orbit checks the
 /// pull request in the URL against the member's projects, so a node of another pull request must not pass.
-pub async fn node_in_pull(github: &GithubClient, token: &str, pull: &PullRef, id: &str) -> Result<bool, GithubError> {
-    let data: Value = github.graphql(token, NODE_PULL, json!({ "id": id })).await?;
+pub async fn node_in_pull(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+    id: &str,
+) -> Result<bool, GithubError> {
+    let data: Value = github
+        .graphql(token, NODE_PULL, json!({ "id": id }))
+        .await?;
     let pr = &data["node"]["pullRequest"];
     let repository = format!("{}/{}", pull.owner, pull.repo);
     Ok(pr["number"].as_i64() == Some(pull.number)
-        && pr["repository"]["nameWithOwner"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(&repository)))
+        && pr["repository"]["nameWithOwner"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&repository)))
 }
 
 /// What a write needs to know about the pull request.
@@ -44,14 +56,25 @@ const BASICS_QUERY: &str = "query PullBasics($owner: String!, $repo: String!, $n
   repository(owner: $owner, name: $repo) { pullRequest(number: $number) { id headRefOid author { login } } }
 }";
 
-pub async fn basics(github: &GithubClient, token: &str, pull: &PullRef) -> Result<Basics, GithubError> {
-    let data: Value = github.graphql(token, BASICS_QUERY, json!({ "owner": pull.owner, "repo": pull.repo, "number": pull.number })).await?;
+pub async fn basics(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<Basics, GithubError> {
+    let data: Value = github
+        .graphql(
+            token,
+            BASICS_QUERY,
+            json!({ "owner": pull.owner, "repo": pull.repo, "number": pull.number }),
+        )
+        .await?;
     let pr = &data["repository"]["pullRequest"];
     let id = pr["id"].as_str().ok_or(GithubError::NotFound)?.to_owned();
     Ok(Basics {
         id,
         head_sha: pr["headRefOid"].as_str().unwrap_or_default().to_owned(),
-        is_author: pr["author"]["login"].as_str().is_some() && pr["author"]["login"] == data["viewer"]["login"],
+        is_author: pr["author"]["login"].as_str().is_some()
+            && pr["author"]["login"] == data["viewer"]["login"],
     })
 }
 
@@ -62,8 +85,18 @@ const PENDING_QUERY: &str = "query PendingReview($owner: String!, $repo: String!
 }";
 
 /// The member's own pending review, if they started one (in Orbit or on GitHub).
-pub async fn pending_review(github: &GithubClient, token: &str, pull: &PullRef) -> Result<Option<PendingReview>, GithubError> {
-    let data: Value = github.graphql(token, PENDING_QUERY, json!({ "owner": pull.owner, "repo": pull.repo, "number": pull.number })).await?;
+pub async fn pending_review(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<Option<PendingReview>, GithubError> {
+    let data: Value = github
+        .graphql(
+            token,
+            PENDING_QUERY,
+            json!({ "owner": pull.owner, "repo": pull.repo, "number": pull.number }),
+        )
+        .await?;
     Ok(data["repository"]["pullRequest"]["reviews"]["nodes"]
         .as_array()
         .and_then(|nodes| nodes.iter().find(|node| node["viewerDidAuthor"] == true))
@@ -79,9 +112,19 @@ const ADD_REVIEW: &str = "mutation AddReview($pullId: ID!, $commit: GitObjectID!
   addPullRequestReview(input: { pullRequestId: $pullId, commitOID: $commit, event: $event, body: $body }) { pullRequestReview { id } }
 }";
 
-async fn add_review(github: &GithubClient, token: &str, basics: &Basics, event: Option<&str>, body: Option<&str>) -> Result<String, GithubError> {
+async fn add_review(
+    github: &GithubClient,
+    token: &str,
+    basics: &Basics,
+    event: Option<&str>,
+    body: Option<&str>,
+) -> Result<String, GithubError> {
     let data: Value = github
-        .graphql(token, ADD_REVIEW, json!({ "pullId": basics.id, "commit": basics.head_sha, "event": event, "body": body }))
+        .graphql(
+            token,
+            ADD_REVIEW,
+            json!({ "pullId": basics.id, "commit": basics.head_sha, "event": event, "body": body }),
+        )
         .await?;
     data["addPullRequestReview"]["pullRequestReview"]["id"]
         .as_str()
@@ -116,17 +159,18 @@ impl NewReviewComment {
         side(&self.side)
             && self.start_side.as_deref().is_none_or(side)
             && self.line > 0
-            && self.start_line.is_none_or(|start| start > 0 && start <= self.line)
+            && self
+                .start_line
+                .is_none_or(|start| start > 0 && start <= self.line)
             && self.start_line.is_some() == self.start_side.is_some()
             && !self.body.trim().is_empty()
             && self.body.len() <= 65_536
             && !self.path.is_empty()
             && self.path.len() <= 4096
             && matches!(self.mode.as_str(), "pending" | "single")
-            && self
-                .head_sha
-                .as_deref()
-                .is_none_or(|sha| (1..=64).contains(&sha.len()) && sha.bytes().all(|c| c.is_ascii_alphanumeric()))
+            && self.head_sha.as_deref().is_none_or(|sha| {
+                (1..=64).contains(&sha.len()) && sha.bytes().all(|c| c.is_ascii_alphanumeric())
+            })
     }
 }
 
@@ -138,9 +182,18 @@ const ADD_THREAD: &str = concat!(
     " }\n  }\n}"
 );
 
-pub async fn add_comment(github: &GithubClient, token: &str, pull: &PullRef, comment: &NewReviewComment) -> Result<ReviewThread, GithubError> {
+pub async fn add_comment(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+    comment: &NewReviewComment,
+) -> Result<ReviewThread, GithubError> {
     let basics = basics(github, token, pull).await?;
-    if comment.head_sha.as_deref().is_some_and(|seen| seen != basics.head_sha) {
+    if comment
+        .head_sha
+        .as_deref()
+        .is_some_and(|seen| seen != basics.head_sha)
+    {
         return Err(GithubError::Conflict("New commits were pushed.".to_owned()));
     }
     if comment.mode == "single" {
@@ -150,7 +203,15 @@ pub async fn add_comment(github: &GithubClient, token: &str, pull: &PullRef, com
             body["start_side"] = json!(side);
         }
         let created: Value = github
-            .rest(token, Method::POST, &format!("repos/{}/{}/pulls/{}/comments", pull.owner, pull.repo, pull.number), Some(&body))
+            .rest(
+                token,
+                Method::POST,
+                &format!(
+                    "repos/{}/{}/pulls/{}/comments",
+                    pull.owner, pull.repo, pull.number
+                ),
+                Some(&body),
+            )
             .await?;
         let id = created["id"].as_i64().ok_or(GithubError::Unexpected(201))?;
         // REST answers with the comment; the API answers with its thread.
@@ -176,7 +237,9 @@ pub async fn add_comment(github: &GithubClient, token: &str, pull: &PullRef, com
         .await?;
     let thread = &data["addPullRequestReviewThread"]["thread"];
     if thread.is_null() {
-        return Err(GithubError::Unprocessable("GitHub could not add the comment on this line.".to_owned()));
+        return Err(GithubError::Unprocessable(
+            "GitHub could not add the comment on this line.".to_owned(),
+        ));
     }
     Ok(review_thread(thread))
 }
@@ -190,10 +253,22 @@ const ADD_REPLY: &str = concat!(
 );
 
 /// A reply; with a pending review it goes into that review, as on GitHub.
-pub async fn reply(github: &GithubClient, token: &str, pull: &PullRef, thread: &str, body: &str) -> Result<ReviewComment, GithubError> {
-    let review = pending_review(github, token, pull).await?.map(|review| review.id);
+pub async fn reply(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+    thread: &str,
+    body: &str,
+) -> Result<ReviewComment, GithubError> {
+    let review = pending_review(github, token, pull)
+        .await?
+        .map(|review| review.id);
     let data: Value = github
-        .graphql(token, ADD_REPLY, json!({ "threadId": thread, "body": body, "reviewId": review }))
+        .graphql(
+            token,
+            ADD_REPLY,
+            json!({ "threadId": thread, "body": body, "reviewId": review }),
+        )
         .await?;
     let comment = &data["addPullRequestReviewThreadReply"]["comment"];
     if comment.is_null() {
@@ -209,8 +284,15 @@ const UPDATE_COMMENT: &str = concat!(
     " } }\n}"
 );
 
-pub async fn update_comment(github: &GithubClient, token: &str, id: &str, body: &str) -> Result<ReviewComment, GithubError> {
-    let data: Value = github.graphql(token, UPDATE_COMMENT, json!({ "id": id, "body": body })).await?;
+pub async fn update_comment(
+    github: &GithubClient,
+    token: &str,
+    id: &str,
+    body: &str,
+) -> Result<ReviewComment, GithubError> {
+    let data: Value = github
+        .graphql(token, UPDATE_COMMENT, json!({ "id": id, "body": body }))
+        .await?;
     let comment = &data["updatePullRequestReviewComment"]["pullRequestReviewComment"];
     if comment.is_null() {
         return Err(GithubError::NotFound);
@@ -218,19 +300,42 @@ pub async fn update_comment(github: &GithubClient, token: &str, id: &str, body: 
     Ok(review_comment(comment))
 }
 
-pub async fn delete_comment(github: &GithubClient, token: &str, id: &str) -> Result<(), GithubError> {
+pub async fn delete_comment(
+    github: &GithubClient,
+    token: &str,
+    id: &str,
+) -> Result<(), GithubError> {
     let _: Value = github
         .graphql(token, "mutation DeleteComment($id: ID!) { deletePullRequestReviewComment(input: { id: $id }) { pullRequestReview { id } } }", json!({ "id": id }))
         .await?;
     Ok(())
 }
 
-const RESOLVE: &str = concat!("mutation ResolveThread($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { ", thread_fields!(), " } } }");
-const UNRESOLVE: &str = concat!("mutation UnresolveThread($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { thread { ", thread_fields!(), " } } }");
+const RESOLVE: &str = concat!(
+    "mutation ResolveThread($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { ",
+    thread_fields!(),
+    " } } }"
+);
+const UNRESOLVE: &str = concat!(
+    "mutation UnresolveThread($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { thread { ",
+    thread_fields!(),
+    " } } }"
+);
 
-pub async fn set_resolved(github: &GithubClient, token: &str, thread: &str, resolved: bool) -> Result<ReviewThread, GithubError> {
-    let (query, field) = if resolved { (RESOLVE, "resolveReviewThread") } else { (UNRESOLVE, "unresolveReviewThread") };
-    let data: Value = github.graphql(token, query, json!({ "id": thread })).await?;
+pub async fn set_resolved(
+    github: &GithubClient,
+    token: &str,
+    thread: &str,
+    resolved: bool,
+) -> Result<ReviewThread, GithubError> {
+    let (query, field) = if resolved {
+        (RESOLVE, "resolveReviewThread")
+    } else {
+        (UNRESOLVE, "unresolveReviewThread")
+    };
+    let data: Value = github
+        .graphql(token, query, json!({ "id": thread }))
+        .await?;
     let node = &data[field]["thread"];
     if node.is_null() {
         return Err(GithubError::NotFound);
@@ -255,13 +360,21 @@ pub enum ReviewRefusal {
 }
 
 /// Submits the member's pending review, or makes a new review with the event when there is none.
-pub async fn submit_review(github: &GithubClient, token: &str, pull: &PullRef, review: &SubmitReview) -> Result<Result<(), ReviewRefusal>, GithubError> {
+pub async fn submit_review(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+    review: &SubmitReview,
+) -> Result<Result<(), ReviewRefusal>, GithubError> {
     let basics = basics(github, token, pull).await?;
     if basics.is_author && review.event != "COMMENT" {
         return Ok(Err(ReviewRefusal::OwnPull));
     }
     let pending = pending_review(github, token, pull).await?;
-    if review.event != "APPROVE" && review.body.trim().is_empty() && pending.as_ref().is_none_or(|item| item.comment_count == 0) {
+    if review.event != "APPROVE"
+        && review.body.trim().is_empty()
+        && pending.as_ref().is_none_or(|item| item.comment_count == 0)
+    {
         return Ok(Err(ReviewRefusal::Empty));
     }
     match pending {
@@ -275,15 +388,28 @@ pub async fn submit_review(github: &GithubClient, token: &str, pull: &PullRef, r
                 .await?;
         }
         None => {
-            add_review(github, token, &basics, Some(&review.event), Some(&review.body)).await?;
+            add_review(
+                github,
+                token,
+                &basics,
+                Some(&review.event),
+                Some(&review.body),
+            )
+            .await?;
         }
     }
     Ok(Ok(()))
 }
 
 /// Deletes the member's pending review and its comments. `false` when there is none.
-pub async fn discard_review(github: &GithubClient, token: &str, pull: &PullRef) -> Result<bool, GithubError> {
-    let Some(pending) = pending_review(github, token, pull).await? else { return Ok(false) };
+pub async fn discard_review(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<bool, GithubError> {
+    let Some(pending) = pending_review(github, token, pull).await? else {
+        return Ok(false);
+    };
     let _: Value = github
         .graphql(token, "mutation DeleteReview($id: ID!) { deletePullRequestReview(input: { pullRequestReviewId: $id }) { pullRequestReview { id } } }", json!({ "id": pending.id }))
         .await?;
@@ -309,36 +435,83 @@ pub struct MergeResult {
     pub sha: String,
 }
 
-pub async fn merge(github: &GithubClient, token: &str, pull: &PullRef, merge: &MergePull) -> Result<MergeResult, GithubError> {
+pub async fn merge(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+    merge: &MergePull,
+) -> Result<MergeResult, GithubError> {
     let mut body = json!({ "merge_method": merge.method, "sha": merge.expected_head_sha });
-    if let Some(title) = merge.commit_title.as_deref().filter(|title| !title.trim().is_empty()) {
+    if let Some(title) = merge
+        .commit_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+    {
         body["commit_title"] = json!(title);
     }
     if let Some(message) = &merge.commit_message {
         body["commit_message"] = json!(message);
     }
     let reply: Value = github
-        .rest(token, Method::PUT, &format!("repos/{}/{}/pulls/{}/merge", pull.owner, pull.repo, pull.number), Some(&body))
+        .rest(
+            token,
+            Method::PUT,
+            &format!(
+                "repos/{}/{}/pulls/{}/merge",
+                pull.owner, pull.repo, pull.number
+            ),
+            Some(&body),
+        )
         .await?;
-    Ok(MergeResult { sha: reply["sha"].as_str().unwrap_or_default().to_owned() })
+    Ok(MergeResult {
+        sha: reply["sha"].as_str().unwrap_or_default().to_owned(),
+    })
 }
 
 /// Deletes the head branch of a merged pull request whose branch is in the same repository. `false` when that is not so.
-pub async fn delete_branch(github: &GithubClient, token: &str, pull: &PullRef) -> Result<bool, GithubError> {
+pub async fn delete_branch(
+    github: &GithubClient,
+    token: &str,
+    pull: &PullRef,
+) -> Result<bool, GithubError> {
     let reply: Value = github
-        .rest(token, Method::GET, &format!("repos/{}/{}/pulls/{}", pull.owner, pull.repo, pull.number), None)
+        .rest(
+            token,
+            Method::GET,
+            &format!("repos/{}/{}/pulls/{}", pull.owner, pull.repo, pull.number),
+            None,
+        )
         .await?;
-    let same_repo = reply["head"]["repo"]["full_name"].as_str().map(str::to_lowercase) == reply["base"]["repo"]["full_name"].as_str().map(str::to_lowercase);
+    let same_repo = reply["head"]["repo"]["full_name"]
+        .as_str()
+        .map(str::to_lowercase)
+        == reply["base"]["repo"]["full_name"]
+            .as_str()
+            .map(str::to_lowercase);
     let branch = reply["head"]["ref"].as_str().unwrap_or_default();
     if reply["merged"] != true || !same_repo || branch.is_empty() {
         return Ok(false);
     }
     let encoded: Vec<String> = branch
         .split('/')
-        .map(|segment| url::form_urlencoded::byte_serialize(segment.as_bytes()).collect::<String>().replace('+', "%20"))
+        .map(|segment| {
+            url::form_urlencoded::byte_serialize(segment.as_bytes())
+                .collect::<String>()
+                .replace('+', "%20")
+        })
         .collect();
     github
-        .rest_empty(token, Method::DELETE, &format!("repos/{}/{}/git/refs/heads/{}", pull.owner, pull.repo, encoded.join("/")), None)
+        .rest_empty(
+            token,
+            Method::DELETE,
+            &format!(
+                "repos/{}/{}/git/refs/heads/{}",
+                pull.owner,
+                pull.repo,
+                encoded.join("/")
+            ),
+            None,
+        )
         .await?;
     Ok(true)
 }
