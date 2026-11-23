@@ -33,6 +33,7 @@ export const WORKSPACE_NAV: readonly SettingsNavItem[] = [
   { href: '/settings/file-storage', label: 'File storage', icon: 'cloudConnection' },
   { href: '/settings/github', label: 'GitHub', icon: 'link2' },
   { href: '/settings/workspace-agentic', label: 'Agentic', icon: 'robot' },
+  { href: '/settings/ai', label: 'AI', icon: 'cpu', permission: 'integrations.manage' },
   // every member but a guest may create a personal export token there
   { href: '/settings/api-tokens', label: 'API tokens', icon: 'key', permission: 'workspace.export_personal' },
   { href: '/settings/webhooks', label: 'Webhooks', icon: 'global', permission: 'integrations.manage' },
