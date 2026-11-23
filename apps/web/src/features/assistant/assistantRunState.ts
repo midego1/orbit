@@ -139,7 +139,13 @@ export function deriveRun({ running, messages }: { running: boolean; messages: r
   if (waiting) return { state: 'waiting', text: statusText('waiting') }
   if (!running) return IDLE_RUN
   const last = messages.at(-1)
-  const call = last?.role === 'assistant' ? last.content.findLast((part) => part.type === 'tool-call' && part.result === undefined) : undefined
+  // an approved change stays in the message that asked for it while the resumed run starts a new one: look for it too
+  const turn = messages.slice(messages.findLastIndex((message) => message.role === 'user') + 1)
+  const approved = turn
+    .filter((message) => message.role === 'assistant')
+    .flatMap((message) => message.content)
+    .findLast((part) => part.type === 'tool-call' && part.result === undefined && part.approval?.approved === true)
+  const call = (last?.role === 'assistant' ? last.content.findLast((part) => part.type === 'tool-call' && part.result === undefined) : undefined) ?? approved
   if (!call?.toolName) return { state: 'thinking', text: statusText('thinking') }
   const keys = taskKeys(messages)
   // an approved call, or a change the user allowed for this chat, runs without a card
