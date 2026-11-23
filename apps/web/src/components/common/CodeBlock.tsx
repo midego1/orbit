@@ -8,10 +8,12 @@ import { CopyCodeButton } from './CopyCodeButton'
 import { MathFormula } from './MathFormula'
 import { MermaidDiagram } from './MermaidDiagram'
 
-export function CodeBlock({ code, language = '' }: { code: string; language?: string }) {
+/** `diagrams={false}` (text a model wrote): a Mermaid block stays code, because drawing it can load images from any
+ * host (node `img`, kanban images, CSS `url()`); formulas still show (KaTeX loads nothing). */
+export function CodeBlock({ code, language = '', diagrams = true }: { code: string; language?: string; diagrams?: boolean }) {
   const [showCode, setShowCode] = useState(false)
   const id = language ? languageId(language) : detectLanguage(code)
-  const mermaid = id === MERMAID_LANGUAGE
+  const mermaid = id === MERMAID_LANGUAGE && diagrams
   const math = id === MATH_LANGUAGE
   const picture = (mermaid || math) && !showCode
 

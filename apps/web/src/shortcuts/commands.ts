@@ -27,6 +27,7 @@ export interface Command {
 
 const REGISTRY = [
   { id: 'palette.open', title: 'Open command menu', group: 'General', keys: 'Mod+K', context: 'global', inInputs: true },
+  { id: 'assistant.toggle', title: 'Ask AI', group: 'General', keys: 'Mod+J', context: 'global', inInputs: true },
   { id: 'help.open', title: 'Show keyboard shortcuts', group: 'General', keys: '?', context: 'global' },
   { id: 'search.open', title: 'Search', group: 'General', keys: '/', context: 'global' },
   { id: 'task.create', title: 'Create task', group: 'General', keys: 'C', context: 'global' },

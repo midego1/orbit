@@ -4,7 +4,7 @@ import { useBindings } from '@/shortcuts/useCommand'
 import { createContext, Fragment, useContext, useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { Link, useLocation, useMatch, useNavigate, useResolvedPath, type LinkProps } from 'react-router'
 import { cva, type VariantProps } from 'class-variance-authority'
-import { Calendar, ChevronDown, CalendarTick, Danger, SecurityUser, Home2 as Home, Layer, Message as MessageSquare, DocumentText as FileText, Search4 as Search, Setting2 as Settings, Sms as Mail, Star, TaskSquare as SquareCheck, Timer, Folder, Add as Plus, Trash } from 'reicon-react'
+import { Calendar, ChevronDown, CalendarTick, Danger, SecurityUser, Home2 as Home, Layer, Message as MessageSquare, DocumentText as FileText, Search4 as Search, Setting2 as Settings, Sparkles, Sms as Mail, Star, TaskSquare as SquareCheck, Timer, Folder, Add as Plus, Trash } from 'reicon-react'
 import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -26,6 +26,7 @@ import { useIsPhone } from '@/features/chat/pages/useChatViewport'
 import { chatEnabled, docsHidden } from './productNavigation'
 import { hostsPageList } from './sidebarSlot'
 import { PROJECT_SETTINGS_GROUPS, projectSettingsPath, projectSettingsProjectOf } from '@/features/tasks/projectSettingsNav'
+import { assistantUi, useAssistantUi } from '@/features/assistant/assistantStore'
 
 const WORKSPACE_LINKS = [
   { to: '/', label: 'Home', icon: Home, enabled: true },
@@ -565,7 +566,14 @@ export function SidebarNav({
 
   const tasksPath = selectedProject ? `/tasks?${new URLSearchParams({ project: selectedProject })}` : '/tasks'
 
-  const paletteKeys = useBindings()['palette.open']
+  const bindings = useBindings()
+  const paletteKeys = bindings['palette.open']
+  const askAiKeys = bindings['assistant.toggle']
+  const { open: assistantOpen } = useAssistantUi()
+  const openAssistant = () => {
+    onNavigate?.()
+    assistantUi.toggle()
+  }
 
   const openSearch = () => {
     onNavigate?.()
@@ -600,6 +608,15 @@ export function SidebarNav({
               ) : null}
             </button>
           )}
+        </Tip>
+        <Tip label={collapsed ? (askAiKeys ? `Ask AI (${shortcutText(askAiKeys)})` : 'Ask AI') : undefined} side="right">
+          <button type="button" data-slot="sidebar-nav-item" data-active={assistantOpen} aria-pressed={assistantOpen} className={cn(sidebarNavItemClass, 'mt-1')} aria-label="Ask AI" onClick={openAssistant}>
+            <SidebarNavTile icon={Sparkles} />
+            <SidebarNavLabel>Ask AI</SidebarNavLabel>
+            {askAiKeys && !collapsed ? (
+              <Kbd className="h-auto rounded-md border border-neutral-300 bg-neutral-200 px-1.5 py-0.5 text-[0.6875rem] font-medium text-muted-foreground dark:border-sidebar-tint/18 dark:bg-white/6">{shortcutText(askAiKeys)}</Kbd>
+            ) : null}
+          </button>
         </Tip>
         </div>
         )}

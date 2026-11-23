@@ -44,6 +44,7 @@ import { SecurityPage } from '@/features/settings/pages/SecurityPage'
 import { GithubAccountPage } from '@/features/settings/pages/GithubAccountPage'
 import { SessionsPage } from '@/features/settings/pages/SessionsPage'
 import { AgenticPage } from '@/features/settings/pages/AgenticPage'
+import { AiPage } from '@/features/settings/pages/AiPage'
 import { ShortcutsPage } from '@/features/settings/pages/ShortcutsPage'
 import { StickersPage } from '@/features/settings/pages/StickersPage'
 import { BlockedPeoplePage } from '@/features/settings/pages/BlockedPeoplePage'
@@ -200,6 +201,7 @@ export default function App() {
                   <Route path="reports" element={<ReportsPage />} />
                   <Route path="github" element={<GithubPage />} />
                   <Route path="agentic" element={<AgenticPage />} />
+                  <Route path="ai" element={<AiPage />} />
                   <Route path="billing" element={<BillingPage />} />
                   <Route path="import" element={<ImportPage />} />
                   <Route path="import/orbit/:importId?" element={<OrbitImportPage />} />

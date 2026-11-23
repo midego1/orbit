@@ -188,7 +188,24 @@ export const EMOJI_SHORTCODES: Record<string, string> = {
  * `chat`: the rules of Discord, where `__text__` is underline and `||text||` is a spoiler. Without it `__text__` is
  * bold, as in standard markdown, and `||` is text (`a || b` in a task is code, not a secret).
  */
-export type MarkdownOptions = { chat?: boolean }
+export type MarkdownOptions = {
+  chat?: boolean
+  /** Text a model wrote (Ask AI): an image from another origin is not loaded (it could carry data out in its URL);
+   * its alt text and address show as plain text instead, a link to another origin shows its full address, and a
+   * Mermaid block stays code (drawing it can load images). */
+  noExternalImages?: boolean
+}
+
+/** Whether `src` is on this app's own origin. */
+function sameOriginImage(src: string): boolean {
+  const origin = globalThis.location?.origin
+  if (!origin) return false
+  try {
+    return new URL(src, origin).origin === origin
+  } catch {
+    return false
+  }
+}
 
 /**
  * Inline markdown. A backslash before an ASCII punctuation character is an escape, as in standard markdown: the
@@ -235,9 +252,13 @@ export function renderMarkdownText(text: string, keyPrefix: string, mentionToken
       const markdownImage = token.match(/^!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)$/)
       const src = markdownImage?.[2] || htmlSource
       const alt = markdownImage?.[1] ?? htmlAlt ?? 'Image'
-      parts.push(src && /^https?:\/\//i.test(src)
-        ? <img key={key} src={src} alt={alt} loading="lazy" className="my-2 block h-auto max-w-full rounded-md" />
-        : token)
+      if (src && /^https?:\/\//i.test(src) && options.noExternalImages && !sameOriginImage(src)) {
+        parts.push(<span key={key} className="break-all text-muted-foreground" data-blocked-image="">{`[image not loaded: ${alt} – ${src}]`}</span>)
+      } else {
+        parts.push(src && /^https?:\/\//i.test(src)
+          ? <img key={key} src={src} alt={alt} loading="lazy" className="my-2 block h-auto max-w-full rounded-md" />
+          : token)
+      }
     } else if (token.startsWith('[')) {
       const linkMatch = token.match(/^\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)$/)
       if (linkMatch) {
@@ -247,6 +268,15 @@ export function renderMarkdownText(text: string, keyPrefix: string, mentionToken
         parts.push(
           path ? (
             <InternalLink key={key} url={linkMatch[2]} path={path}>{label}</InternalLink>
+          ) : options.noExternalImages ? (
+            // model text: the address a click opens is always visible
+            <Fragment key={key}>
+              {label} (
+              <a href={safeHref(linkMatch[2])} target="_blank" rel="noopener noreferrer" className="break-all text-primary hover:underline">
+                {linkMatch[2]}
+              </a>
+              )
+            </Fragment>
           ) : (
             <a key={key} href={safeHref(linkMatch[2])} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
               {label}
@@ -373,7 +403,7 @@ export function renderMarkdownBlocks(text: string, keyPrefix: string, mentionTok
         if (i < lines.length) i += 1
       }
 
-      blocks.push(<CodeBlock key={`${keyPrefix}-code-${i}`} code={codeLines.join('\n')} language={language} />)
+      blocks.push(<CodeBlock key={`${keyPrefix}-code-${i}`} code={codeLines.join('\n')} language={language} diagrams={!options.noExternalImages} />)
       continue
     }
 

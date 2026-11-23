@@ -12,6 +12,9 @@
     "api:generate": "bun run scripts/generate-api.ts"
   },
   "dependencies": {
+    "@ag-ui/client": "^1.0.5",
+    "@assistant-ui/react": "^0.15.37",
+    "@assistant-ui/react-ag-ui": "^0.1.11",
     "@base-ui/react": "^1.8.0",
     "@blocknote/core": "^0.55.0",
     "@blocknote/react": "^0.55.0",

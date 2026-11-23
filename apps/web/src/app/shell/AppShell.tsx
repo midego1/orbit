@@ -45,6 +45,7 @@ import { MenuSurfaceContext } from '@/components/ui/menuSurface'
 import { useSidebarMenuSurface } from './sidebarMenu'
 import { hostsPageList, SidebarSlotContext } from './sidebarSlot'
 import { PullOverlay } from '@/features/pulls/PullOverlay'
+import { AssistantDock } from '@/features/assistant/AssistantDock'
 
 const desktopQuery = '(min-width: 900px)'
 const subscribeDesktop = (onChange: () => void) => {
@@ -223,6 +224,9 @@ function Shell() {
         <MobileDock chatBadge={chatBadge} chatUnread={chatUnread} mailBadge={mailBadge} mailEnabled={mailEnabled} />
         {!guest && <DonationReminder />}
       </div>
+
+      {/* Ask AI: a column on the right (desktop) or a sheet (phone). A guest cannot use it. */}
+      {!guest ? <AssistantDock /> : null}
 
       <SideSheet open={drawerOpen} onOpenChange={setDrawerOpen}>
         <SideSheetContent
