@@ -24,6 +24,11 @@ export function AssistantStateEdge() {
   const reduced = useReducedMotion()
   useEffect(() => {
     syncDocumentTitle(run.state)
+    if (run.state !== 'waiting') return
+    // a page sets its own title when the user moves on while the change waits: put the prefix back
+    const observer = new MutationObserver(() => syncDocumentTitle('waiting'))
+    observer.observe(document.head, { subtree: true, childList: true, characterData: true })
+    return () => observer.disconnect()
   }, [run.state])
   // the prefix goes when Ask AI unmounts (sign-out, a guest page)
   useEffect(() => () => syncDocumentTitle('idle'), [])

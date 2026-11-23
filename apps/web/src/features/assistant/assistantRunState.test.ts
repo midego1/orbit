@@ -61,6 +61,13 @@ test('an approved change still running in the message that asked for it shows as
   expect(deriveRun({ running: true, messages: [user('Move GEN-3'), asked, user('and now?'), assistant()] }).state).toBe('thinking')
 })
 
+test('an approved change that already has its result does not keep the run changing', () => {
+  const update = { task_id: '0b6c9a52-8f43-4c3e-9a0e-1d2f3a4b5c6d', status_id: 's2' }
+  const done = assistant(call('update_task', update, { approval: { approved: true }, result: '{"id":"x"}' }))
+  // the resumed run thinks about its answer
+  expect(deriveRun({ running: true, messages: [user('Move GEN-3'), done, assistant()] })).toEqual({ state: 'thinking', text: 'Thinking…' })
+})
+
 test('status text names the task by its key, from the call or from earlier results', () => {
   const keys = taskKeys([assistant(call('list_tasks', {}, { result: TASKS }))])
   expect(keys.get('7a1e2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b')).toBe('LCH-4')

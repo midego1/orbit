@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from 'react'
+import { createContext, Fragment, type ReactNode } from 'react'
 import { TaskChip } from './AssistantCards'
 import { findKnownKeys, type KnownTask } from './cards'
 
@@ -21,3 +21,7 @@ export function taskChipRun(known: ReadonlyMap<string, KnownTask>) {
     return [...parts, <Fragment key="rest">{plain(run.slice(cursor))}</Fragment>]
   }
 }
+
+/** The conversation's chip renderer (`taskChipRun` of its known keys), made once in the thread and read by each
+    answer, so an answer does not watch every message itself. */
+export const TaskChipContext = createContext<((text: string, plain: (text: string) => ReactNode) => ReactNode) | null>(null)

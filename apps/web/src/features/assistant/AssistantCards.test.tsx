@@ -5,7 +5,7 @@ import { renderMarkdownBlocks } from '@/lib/markdown'
 import { MarkdownTextContext } from '@/lib/markdownTextContext'
 import { PreviewCard, ResultCard } from './AssistantCards'
 import { taskChipRun } from './taskChipRun'
-import { readCard, readPreview, type CardData, type KnownTask } from './cards'
+import { readCard, readPreview, totalsLine, type CardData, type KnownTask } from './cards'
 
 const W = '0193aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee'
 
@@ -28,7 +28,7 @@ function show(node: React.ReactNode) {
 }
 
 test('a task card links to the task and shows its title as text, not HTML', () => {
-  const card = readCard({ card: { ...task(1), title: '<b>bold</b> <img src=x onerror=alert(1)>' } }) as CardData
+  const card = readCard({ card: { ...task(1), title: '<b>bold</b> <img src=x onerror=alert(1)>' } }, 'get_task') as CardData
   const view = show(<ResultCard card={card} />)
   const link = view.container.querySelector('a[data-slot="task-card"]')
   expect(link?.getAttribute('href')).toBe(`/tasks/lch1?workspace=${W}`)
@@ -44,10 +44,10 @@ test('a long task list shows five rows with exact totals until "Show all"', () =
   const card = readCard({
     card: {
       kind: 'tasks',
-      totals: { tasks: 8, open: 7, done: 1, byProject: [], byStatus: [], complete: true },
+      totals: { tasks: 8, open: 7, done: 1, byProject: [], byStatus: [], complete: true, shown: 8 },
       items,
     },
-  }) as CardData
+  }, 'list_tasks') as CardData
   const view = show(<ResultCard card={card} />)
   expect(view.getByText(/8 tasks · 7 open · 1 done/)).toBeTruthy()
   expect(view.container.querySelectorAll('[data-slot="task-row"]').length).toBe(5)
@@ -59,11 +59,11 @@ test('a long task list shows five rows with exact totals until "Show all"', () =
 })
 
 test('a short list shows every row and no "Show all"', () => {
-  const card = readCard({ card: { kind: 'tasks', totals: { tasks: 2, open: 2, done: 0, complete: false }, items: [task(1), task(2)] } }) as CardData
+  const card = readCard({ card: { kind: 'tasks', totals: { tasks: 2, open: 2, done: 0, complete: false, shown: 2 }, items: [task(1), task(2)] } }, 'list_tasks') as CardData
   const view = show(<ResultCard card={card} />)
   expect(view.container.querySelectorAll('[data-slot="task-row"]').length).toBe(2)
   expect(view.queryByRole('button', { name: /Show all/ })).toBeNull()
-  expect(view.getByText(/first page/)).toBeTruthy()
+  expect(view.getByText(/listed tasks only/)).toBeTruthy()
 })
 
 test('a change preview strikes the old value through next to the new one', () => {
@@ -84,7 +84,7 @@ test('a create preview is a task card without a link', () => {
 test('a summary lists each change with its link', () => {
   const card = readCard({
     card: { kind: 'summary', changes: [{ verb: 'Updated', key: 'LCH-7', title: 'Seven', href: `/tasks/t7?workspace=${W}` }, { verb: 'Created', key: null, title: 'New', href: 'https://evil.example' }] },
-  }) as CardData
+  }, 'orbit_summary') as CardData
   const view = show(<ResultCard card={card} />)
   expect(view.getByText('2 changes applied')).toBeTruthy()
   const links = view.container.querySelectorAll('a')
@@ -103,4 +103,12 @@ test('task keys in an answer become chips only when known, never in code', () =>
   // an unknown key stays text
   expect(view.container.textContent).toContain('LCH-4')
   expect([...view.container.querySelectorAll('a')].some((a) => a.textContent?.includes('LCH-4'))).toBe(false)
+})
+
+test('the counts line says how many of the counted tasks are listed, and leaves out unknown open/done', () => {
+  const card = (totals: object, items = [task(1), task(2)]) => readCard({ card: { kind: 'tasks', totals, items } }, 'list_tasks')
+  const many = card({ tasks: 120, open: 100, done: 20, complete: true, shown: 100 })
+  expect(many?.kind === 'tasks' && totalsLine(many)).toBe('120 tasks · 100 open · 20 done · 2 listed')
+  const unknown = card({ tasks: 2, open: null, done: null, complete: true, shown: 2 })
+  expect(unknown?.kind === 'tasks' && totalsLine(unknown)).toBe('2 tasks')
 })

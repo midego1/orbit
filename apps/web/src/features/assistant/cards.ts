@@ -23,7 +23,9 @@ export type Count = { name: string; key?: string; category?: string; count: numb
 
 export type TasksCardData = {
   kind: 'tasks'
-  totals: { tasks: number; open: number; done: number; byProject: Count[]; byStatus: Count[]; complete: boolean }
+  /** Counted by the server over every task the call matches (`complete`), or over the listed ones only. `open` and
+      `done` are null when a status could not be read; `shown`: how many the call listed. */
+  totals: { tasks: number; open: number | null; done: number | null; byProject: Count[]; byStatus: Count[]; complete: boolean; shown: number }
   items: TaskCardData[]
 }
 
@@ -42,6 +44,19 @@ export type ApprovalPreview = { kind: 'change'; task: TaskCardData; changes: Fie
 /** The step the server adds at the end of a message that made changes; it carries the summary card only. */
 export const SUMMARY_TOOL = 'orbit_summary'
 
+/** The card kind each tool's result may carry (the server builds no other): a card on another step is ignored. */
+const CARD_KINDS: Record<string, CardData['kind']> = {
+  get_task: 'task',
+  create_task: 'task',
+  update_task: 'task',
+  list_tasks: 'tasks',
+  list_projects: 'projects',
+  list_docs: 'docs',
+  search_docs: 'docs',
+  get_doc: 'docs',
+  [SUMMARY_TOOL]: 'summary',
+}
+
 const MAX_TEXT = 300
 const CATEGORIES: readonly string[] = ['unstarted', 'started', 'completed', 'cancelled', 'duplicate']
 const PRIORITIES: readonly string[] = ['none', 'low', 'medium', 'high', 'urgent']
@@ -55,17 +70,21 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
 
+/** Plain text without bidi overrides or isolates, which could reorder what the user reads. */
 function str(value: unknown, max = MAX_TEXT): string {
-  return typeof value === 'string' ? value.slice(0, max) : ''
+  return typeof value === 'string' ? value.replace(/[\u202A-\u202E\u2066-\u2069]/g, '').slice(0, max) : ''
 }
 
 function count(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
 }
 
-/** `GEN-12`: a project key and a number, as the server builds it. */
+/** A task key as the server builds and checks it (`cards.rs` `is_task_key`): a project key and a number, `GEN-12`. */
+export const TASK_KEY_SOURCE = '[A-Za-z0-9_]{1,20}-[1-9]\\d{0,14}'
+const TASK_KEY = new RegExp(`^${TASK_KEY_SOURCE}$`)
+
 export function isTaskKey(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9_]{1,20}-[1-9]\d{0,14}$/.test(value)
+  return typeof value === 'string' && TASK_KEY.test(value)
 }
 
 /**
@@ -143,10 +162,11 @@ function links(value: unknown): LinkItem[] {
     })
 }
 
-/** The card a step's result carries (`{…, "card": {…}}`), checked. `null` when it has none or it is not valid. */
-export function readCard(result: unknown): CardData | null {
+/** The card a step's result carries (`{…, "card": {…}}`), checked. `null` when it has none, it is not valid, or the
+    step's tool has no card of that kind. */
+export function readCard(result: unknown, tool: string | undefined): CardData | null {
   const card = record(record(result)?.card)
-  if (!card) return null
+  if (!card || !tool || CARD_KINDS[tool] !== card.kind) return null
   switch (card.kind) {
     case 'task':
       return task(card, true)
@@ -156,11 +176,12 @@ export function readCard(result: unknown): CardData | null {
         kind: 'tasks',
         totals: {
           tasks: count(totals.tasks),
-          open: count(totals.open),
-          done: count(totals.done),
+          open: totals.open === null ? null : count(totals.open),
+          done: totals.done === null ? null : count(totals.done),
           byProject: counts(totals.byProject),
           byStatus: counts(totals.byStatus),
           complete: totals.complete !== false,
+          shown: count(totals.shown),
         },
         items: list(card.items).flatMap((item) => task(item, true) ?? []),
       }
@@ -203,8 +224,11 @@ export function readPreview(value: unknown): ApprovalPreview | null {
   return null
 }
 
-/** Groups of a task list: by project when there is more than one, else by status; with their exact counts. */
-export function groupTasks(items: TaskCardData[]): { label: string; tasks: TaskCardData[] }[] {
+/**
+ * Groups of a task list: by project when the listed tasks span more than one, else by status. `count` is the group's
+ * number in the server's totals (every matching task), else the number listed.
+ */
+export function groupTasks(items: TaskCardData[], totals?: TasksCardData['totals']): { label: string; count: number; tasks: TaskCardData[] }[] {
   const projects = new Set(items.map((item) => item.project?.key ?? ''))
   const byProject = projects.size > 1
   const groups = new Map<string, TaskCardData[]>()
@@ -212,13 +236,29 @@ export function groupTasks(items: TaskCardData[]): { label: string; tasks: TaskC
     const label = byProject ? (item.project?.name || 'No project') : (item.status?.name ?? 'No status')
     groups.set(label, [...(groups.get(label) ?? []), item])
   }
-  return [...groups].map(([label, tasks]) => ({ label, tasks }))
+  const counted = (label: string, listed: number) => {
+    if (!totals?.complete) return listed
+    const entries = (byProject ? totals.byProject : totals.byStatus).filter((entry) => entry.name === label)
+    return entries.length ? entries.reduce((sum, entry) => sum + entry.count, 0) : listed
+  }
+  return [...groups].map(([label, tasks]) => ({ label, count: counted(label, tasks.length), tasks }))
+}
+
+/** The counts line of a task list: what the server counted, and how many of those the card lists. */
+export function totalsLine(card: TasksCardData): string {
+  const { totals } = card
+  const parts = [totals.tasks === 1 ? '1 task' : `${totals.tasks} tasks`]
+  if (totals.open !== null && totals.done !== null) parts.push(`${totals.open} open`, `${totals.done} done`)
+  let line = parts.join(' · ')
+  if (!totals.complete) line += ' (listed tasks only)'
+  else if (card.items.length < totals.tasks) line += ` · ${card.items.length} listed`
+  return line
 }
 
 /** What the panel knows of a task key: only keys that came in card data of this conversation link anywhere. */
 export type KnownTask = { key: string; title: string; href: string; status: CardStatus | null }
 
-type CallPart = { type: string; toolName?: string; result?: unknown }
+type CallPart = { type: string; toolName?: string; toolCallId?: string; result?: unknown }
 
 /** Every task in the cards of the conversation's results, by key (the latest card of a key wins). */
 export function knownTasks(messages: readonly { role: string; content: readonly CallPart[] }[]): Map<string, KnownTask> {
@@ -230,7 +270,7 @@ export function knownTasks(messages: readonly { role: string; content: readonly 
     if (message.role !== 'assistant') continue
     for (const part of message.content) {
       if (part.type !== 'tool-call' || part.result === undefined) continue
-      const card = readCard(parseResult(part.result))
+      const card = readCard(parseResult(part.result), part.toolName)
       if (card?.kind === 'task') add(card)
       else if (card?.kind === 'tasks') card.items.forEach(add)
     }
@@ -249,11 +289,23 @@ function parseResult(result: unknown): unknown {
 
 export type KeyMatch = { start: number; end: number; task: KnownTask }
 
+const KEY_IN_TEXT = new RegExp(`(?<![A-Za-z0-9_-])(${TASK_KEY_SOURCE})(?![A-Za-z0-9_]|-\\d)`, 'g')
+
+/** Which tool results the known keys come from: changes only when a result arrives, not with each streamed word. */
+export function resultsKey(messages: readonly { role: string; content: readonly CallPart[] }[]): string {
+  let key = ''
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    for (const part of message.content) if (part.type === 'tool-call' && part.result !== undefined) key += `${part.toolCallId ?? ''},`
+  }
+  return key
+}
+
 /** The known task keys in a run of plain text, as whole words (`GEN-1` but not `XGEN-1`, `GEN-12` or `GEN-1a`). */
 export function findKnownKeys(text: string, known: ReadonlyMap<string, KnownTask>): KeyMatch[] {
   if (known.size === 0) return []
   const matches: KeyMatch[] = []
-  for (const match of text.matchAll(/(?<![A-Za-z0-9_-])([A-Za-z0-9_]{1,20}-[1-9]\d{0,14})(?![A-Za-z0-9_]|-\d)/g)) {
+  for (const match of text.matchAll(KEY_IN_TEXT)) {
     const task = known.get(match[1])
     if (task) matches.push({ start: match.index, end: match.index + match[1].length, task })
   }

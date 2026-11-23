@@ -48,7 +48,7 @@ test('a task card keeps user text as plain strings and drops bad fields', () => 
       due: 'tomorrow',
       assignees: [{ name: '<script>' }, 'x', { name: 5 }],
     }),
-  })
+  }, 'get_task')
   expect(card?.kind).toBe('task')
   const t = card as TaskCardData
   expect(t.title).toBe('<img src=x onerror=alert(1)>')
@@ -59,16 +59,16 @@ test('a task card keeps user text as plain strings and drops bad fields', () => 
 })
 
 test('a task without a valid link gives no card, and a list drops such rows', () => {
-  expect(readCard({ card: task('t1', 'LCH-1', { href: 'https://evil.example' }) })).toBeNull()
+  expect(readCard({ card: task('t1', 'LCH-1', { href: 'https://evil.example' }) }, 'get_task')).toBeNull()
   const list = readCard({
     card: { kind: 'tasks', totals: { tasks: 2, open: 2, done: 0, byProject: [], byStatus: [], complete: true }, items: [task('t1', 'LCH-1'), task('t2', 'LCH-2', { href: '//x' })] },
-  })
+  }, 'list_tasks')
   expect(list?.kind === 'tasks' && list.items.map((item) => item.key)).toEqual(['LCH-1'])
   expect(list?.kind === 'tasks' && list.totals.tasks).toBe(2)
 })
 
 test('a list is grouped by project when it spans projects, else by status', () => {
-  const a = readCard({ card: task('t1', 'LCH-1') }) as TaskCardData
+  const a = readCard({ card: task('t1', 'LCH-1') }, 'get_task') as TaskCardData
   const b = { ...a, key: 'GEN-1', project: { name: 'General', key: 'GEN' } }
   const c = { ...a, key: 'LCH-2', status: { name: 'Done', category: 'completed' as const, color: null } }
   expect(groupTasks([a, b, c]).map((group) => [group.label, group.tasks.length])).toEqual([
@@ -117,4 +117,34 @@ test('known keys match as whole words only', () => {
   expect(found('(GEN-1) GEN-1a GEN-1-2 gen-1')).toEqual(['GEN-1'])
   expect(found('nothing here')).toEqual([])
   expect(findKnownKeys('GEN-1', new Map())).toEqual([])
+})
+
+test('a card counts only on the step of a tool that has that kind of card', () => {
+  const card = { card: task('t1', 'LCH-1') }
+  expect(readCard(card, 'get_task')?.kind).toBe('task')
+  expect(readCard(card, 'list_labels')).toBeNull()
+  expect(readCard(card, undefined)).toBeNull()
+  // a summary only from the server's own summary step
+  const summary = { card: { kind: 'summary', changes: [{ verb: 'Updated', key: 'LCH-1', title: 'x', href: null }] } }
+  expect(readCard(summary, 'orbit_summary')?.kind).toBe('summary')
+  expect(readCard(summary, 'list_tasks')).toBeNull()
+  // nor do keys from such a card become links
+  const messages = [{ role: 'assistant', content: [{ type: 'tool-call', toolName: 'list_labels', result: JSON.stringify(card) }] }]
+  expect(knownTasks(messages).size).toBe(0)
+})
+
+test('bidi overrides are stripped from card text', () => {
+  const card = readCard({ card: task('t1', 'LCH-1', { title: 'Pay \u202Efdp.exe\u2066' }) }, 'get_task') as TaskCardData
+  expect(card.title).toBe('Pay fdp.exe')
+})
+
+test('group counts come from the totals of every matching task when they are complete', () => {
+  const a = readCard({ card: task('t1', 'LCH-1') }, 'get_task') as TaskCardData
+  const b = { ...a, key: 'GEN-1', project: { name: 'General', key: 'GEN' } }
+  const totals = { tasks: 40, open: 30, done: 10, complete: true, shown: 2, byStatus: [], byProject: [{ name: 'Launch', key: 'LCH', count: 25 }, { name: 'General', key: 'GEN', count: 15 }] }
+  expect(groupTasks([a, b], totals).map((group) => [group.label, group.count])).toEqual([
+    ['Launch', 25],
+    ['General', 15],
+  ])
+  expect(groupTasks([a, b], { ...totals, complete: false }).map((group) => group.count)).toEqual([1, 1])
 })

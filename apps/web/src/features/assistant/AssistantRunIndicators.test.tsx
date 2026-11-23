@@ -65,3 +65,17 @@ test('with reduced motion the thinking edge does not pulse', () => {
   act(() => assistantUi.setRun({ state: 'thinking', text: 'Thinking…' }))
   expect(view.container.querySelector('[data-assistant-edge]')!.getAttribute('data-motion')).toBe('steady')
 })
+
+test('the title prefix comes back when a page sets its own title while a change waits', async () => {
+  render(<AssistantStateEdge />)
+  act(() => assistantUi.setRun({ state: 'waiting', text: 'Waiting for your approval' }))
+  expect(document.title).toBe(`${TITLE_PREFIX}Orbit`)
+  // the user opens another page, which sets its title
+  document.title = 'Launch notes'
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(document.title).toBe(`${TITLE_PREFIX}Launch notes`)
+  act(() => assistantUi.setRun(IDLE_RUN))
+  document.title = 'Tasks'
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(document.title).toBe('Tasks')
+})

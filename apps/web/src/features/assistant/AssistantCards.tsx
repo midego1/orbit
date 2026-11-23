@@ -10,7 +10,7 @@ import { relativeTime } from '@/lib/format'
 import { PriorityIcon } from '@/features/tasks/components/PriorityIcon'
 import { TaskStatusIcon } from '@/features/tasks/components/TaskStatusIcon'
 import { PRIORITY_LABEL } from '@/features/tasks/taskMeta'
-import { groupTasks, isDone, type ApprovalPreview, type CardData, type CardStatus, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData } from './cards'
+import { groupTasks, totalsLine, isDone, type ApprovalPreview, type CardData, type CardStatus, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData } from './cards'
 
 /** Rows shown before "Show all". */
 const LIST_PREVIEW = 5
@@ -106,16 +106,12 @@ function TaskRow({ task }: { task: TaskCardData }) {
   )
 }
 
-function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`
-}
-
 /** A task list: exact counts from the server, rows grouped by project (or status), folded above five rows. */
 export function TaskListCard({ card }: { card: TasksCardData }) {
   const [all, setAll] = useState(card.items.length <= LIST_PREVIEW)
-  const { totals } = card
   const limit = all ? card.items.length : LIST_PREVIEW
-  const groups = groupTasks(card.items)
+  const listedAll = card.items.length === card.totals.tasks
+  const groups = groupTasks(card.items, card.totals)
     .map((group, index, every) => {
       const before = every.slice(0, index).reduce((sum, earlier) => sum + earlier.tasks.length, 0)
       return { ...group, shown: group.tasks.slice(0, Math.max(0, limit - before)) }
@@ -124,13 +120,13 @@ export function TaskListCard({ card }: { card: TasksCardData }) {
   return (
     <section data-slot="task-list-card" aria-label="Tasks" className="flex flex-col gap-1 rounded-lg border bg-card px-2 py-2">
       <p className="px-1.5 text-[0.6875rem] text-muted-foreground">
-        {plural(totals.tasks, 'task')} · {totals.open} open · {totals.done} done{totals.complete ? '' : ' (first page)'}
+        {totalsLine(card)}
       </p>
       {groups.map((group) => (
         <div key={group.label} className="flex flex-col">
           <p className="flex items-center gap-1.5 px-1.5 pt-1.5 pb-0.5 text-[0.6875rem] font-medium text-foreground">
             {group.label}
-            <span className="text-muted-foreground tabular-nums">{group.tasks.length}</span>
+            <span className="text-muted-foreground tabular-nums">{group.count}</span>
           </p>
           <ul className="flex flex-col">
             {group.shown.map((task) => (
@@ -141,7 +137,7 @@ export function TaskListCard({ card }: { card: TasksCardData }) {
       ))}
       {card.items.length > LIST_PREVIEW ? (
         <button type="button" aria-expanded={all} className={cn('mx-1.5 mt-0.5 self-start rounded text-xs text-primary hover:underline', linkRing)} onClick={() => setAll(!all)}>
-          {all ? 'Show less' : `Show all ${card.items.length}`}
+          {all ? 'Show less' : listedAll ? `Show all ${card.items.length}` : `Show the ${card.items.length} listed`}
         </button>
       ) : null}
     </section>

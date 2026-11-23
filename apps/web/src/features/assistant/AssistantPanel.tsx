@@ -1,7 +1,7 @@
 // The Ask AI panel. The conversation is kept on the server (per user and workspace, a few hours): the panel loads it,
 // mounts the AG-UI runtime on it and streams runs from `POST …/run`. The server stores a waiting change with its exact
 // arguments; the approval card only answers approve or decline, so a reload shows the same card.
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { HttpAgent } from '@ag-ui/client'
@@ -31,8 +31,8 @@ import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
 import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
 import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
-import { taskChipRun } from './taskChipRun'
-import { knownTasks, readCard, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
+import { TaskChipContext, taskChipRun } from './taskChipRun'
+import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
 
 const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
@@ -246,6 +246,11 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
     }
   }, [messages, running, navigate, wouldInterrupt])
 
+  // task keys link only when this conversation's cards named them (never a key the model made up); worked out again
+  // only when a tool result arrives, not with each streamed word
+  const results = resultsKey(messages)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const textRun = useMemo(() => taskChipRun(knownTasks(messages)), [results])
   const waiting = messages.some((message) => message.role === 'assistant' && message.content.some((part) => part.type === 'tool-call' && isWaiting(part.approval)))
   const empty = messages.length === 0
   const last = messages.at(-1)
@@ -300,94 +305,96 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   return (
     <PanelShell ref={root} onClose={onClose} tools={tools}>
       <AssistantStatusLine />
-      <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
-        <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
-          <ThreadPrimitive.Empty>
-            <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
-              <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
-              <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
-              <div className="flex flex-col gap-1.5">
-                {STARTERS.map((starter) => (
-                  <Button key={starter} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => send(starter)}>
-                    {starter}
-                  </Button>
-                ))}
+      <TaskChipContext value={textRun}>
+        <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
+          <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+            <ThreadPrimitive.Empty>
+              <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
+                <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
+                <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
+                <div className="flex flex-col gap-1.5">
+                  {STARTERS.map((starter) => (
+                    <Button key={starter} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => send(starter)}>
+                      {starter}
+                    </Button>
+                  ))}
+                </div>
               </div>
-            </div>
-          </ThreadPrimitive.Empty>
-          <ol className="flex flex-col gap-3 py-4" aria-live="polite">
-            <ThreadPrimitive.Messages>{({ message }) => <Message role={message.role} />}</ThreadPrimitive.Messages>
-            {thinking && !empty ? (
-              <li className="flex items-center gap-2 text-[0.8125rem] text-muted-foreground">
-                <Spinner role="presentation" aria-hidden aria-label={undefined} className="size-3.5" />
-                Thinking…
-              </li>
-            ) : null}
-          </ol>
-        </ThreadPrimitive.Viewport>
-        {runError ? (
-          <p role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
-            {runError}
-          </p>
-        ) : null}
-        {!follow && pageLink ? (
-          <button
-            type="button"
-            className="mx-3 mb-2 flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-left text-xs text-foreground transition-colors outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
-            onClick={() => navigate(pageLink)}
+            </ThreadPrimitive.Empty>
+            <ol className="flex flex-col gap-3 py-4" aria-live="polite">
+              <ThreadPrimitive.Messages>{({ message }) => <Message role={message.role} />}</ThreadPrimitive.Messages>
+              {thinking && !empty ? (
+                <li className="flex items-center gap-2 text-[0.8125rem] text-muted-foreground">
+                  <Spinner role="presentation" aria-hidden aria-label={undefined} className="size-3.5" />
+                  Thinking…
+                </li>
+              ) : null}
+            </ol>
+          </ThreadPrimitive.Viewport>
+          {runError ? (
+            <p role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+              {runError}
+            </p>
+          ) : null}
+          {!follow && pageLink ? (
+            <button
+              type="button"
+              className="mx-3 mb-2 flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-left text-xs text-foreground transition-colors outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+              onClick={() => navigate(pageLink)}
+            >
+              <ArrowUpRight className="size-3.5 shrink-0 text-primary" />
+              Ask AI wants to show you a page: go there
+            </button>
+          ) : null}
+          <form
+            className="shrink-0 px-3 pb-3"
+            onSubmit={(event: FormEvent) => {
+              event.preventDefault()
+              send()
+            }}
           >
-            <ArrowUpRight className="size-3.5 shrink-0 text-primary" />
-            Ask AI wants to show you a page: go there
-          </button>
-        ) : null}
-        <form
-          className="shrink-0 px-3 pb-3"
-          onSubmit={(event: FormEvent) => {
-            event.preventDefault()
-            send()
-          }}
-        >
-          <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
-            <label htmlFor="ask-ai-input" className="sr-only">
-              Message Ask AI
-            </label>
-            <textarea
-              id="ask-ai-input"
-              ref={input}
-              rows={1}
-              value={draft}
-              disabled={waiting}
-              placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
-              className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={onKeyDown}
-            />
-            {running ? (
-              <Tip label="Stop">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="icon-sm"
-                  aria-label="Stop"
-                  onClick={() => {
-                    aui.thread().cancelRun()
-                    onStop()
-                  }}
-                >
-                  <Stop />
-                </Button>
-              </Tip>
-            ) : (
-              <Tip label="Send">
-                <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
-                  <ArrowUp />
-                </Button>
-              </Tip>
-            )}
-          </div>
-          <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
-        </form>
-      </ThreadPrimitive.Root>
+            <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
+              <label htmlFor="ask-ai-input" className="sr-only">
+                Message Ask AI
+              </label>
+              <textarea
+                id="ask-ai-input"
+                ref={input}
+                rows={1}
+                value={draft}
+                disabled={waiting}
+                placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
+                className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={onKeyDown}
+              />
+              {running ? (
+                <Tip label="Stop">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="icon-sm"
+                    aria-label="Stop"
+                    onClick={() => {
+                      aui.thread().cancelRun()
+                      onStop()
+                    }}
+                  >
+                    <Stop />
+                  </Button>
+                </Tip>
+              ) : (
+                <Tip label="Send">
+                  <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
+                    <ArrowUp />
+                  </Button>
+                </Tip>
+              )}
+            </div>
+            <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
+          </form>
+        </ThreadPrimitive.Root>
+      </TaskChipContext>
     </PanelShell>
   )
 }
@@ -415,10 +422,7 @@ function AnswerText({ text }: { text: string }) {
     return last?.type === 'text' && last.text === text
   })
   const [copied, setCopied] = useState(false)
-  // task keys link only when this conversation's cards named them (never a key the model made up)
-  const messages = useAuiState((s) => s.thread.messages)
-  const known = useMemo(() => knownTasks(messages), [messages])
-  const textRun = useMemo(() => taskChipRun(known), [known])
+  const textRun = useContext(TaskChipContext)
   async function copy() {
     try {
       await navigator.clipboard.writeText(text)
@@ -485,7 +489,7 @@ function Step(props: ToolCallMessagePartProps) {
   const interrupt = useAgUiInterrupts().find((entry) => entry.toolCallId === props.toolCallId)
   const view = describeStep(toolName, args, names, interrupt?.metadata?.risk)
   // the server's card of this result (or the summary at the end of a message), never built from the model's text
-  const card = outcome === 'done' ? readCard(result) : null
+  const card = outcome === 'done' ? readCard(result, toolName) : null
   if (toolName === SUMMARY_TOOL) return card?.kind === 'summary' ? <SummaryCard card={card} /> : null
   if (outcome === 'waiting') {
     return (

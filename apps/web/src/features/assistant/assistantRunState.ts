@@ -2,6 +2,7 @@
 // a status line at the top of the panel, and a tab title prefix while a change waits. Everything here is derived from
 // the panel's own run state (is a run streaming, which tool call is in flight, does a call wait for approval), so it
 // never needs its own bookkeeping. The colours are CSS variables in index.css (`--assistant-*`).
+import { isTaskKey } from './cards'
 import { fallbackRisk, parseToolResult } from './toolSteps'
 
 /** idle: nothing runs. thinking: the model thinks or reads. changing: an approved change runs. waiting: a change
@@ -28,8 +29,6 @@ function isWaiting(approval: Approval | undefined): boolean {
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-/** A task identifier as Orbit shows it, e.g. GEN-3. */
-const TASK_KEY = /^[A-Za-z][A-Za-z0-9]{0,9}-\d{1,7}$/
 
 /** Task ids to their identifiers, from the tool results of this conversation (a list or a single task), so the
     status line says "Changing GEN-3…" and not an id. */
@@ -43,7 +42,7 @@ export function taskKeys(messages: readonly Message[]): Map<string, string> {
     }
     const record = objectOf(value)
     if (!record) return
-    if (typeof record.id === 'string' && typeof record.identifier === 'string' && TASK_KEY.test(record.identifier)) {
+    if (typeof record.id === 'string' && typeof record.identifier === 'string' && isTaskKey(record.identifier)) {
       keys.set(record.id, record.identifier.toUpperCase())
     }
     for (const child of Object.values(record)) if (child !== null && typeof child === 'object') visit(child, depth + 1)
@@ -68,7 +67,7 @@ export function callSubject(args: unknown, keys?: ReadonlyMap<string, string>): 
   for (const name of ['task_id', 'identifier', 'key']) {
     const value = record[name]
     if (typeof value !== 'string') continue
-    if (name !== 'key' && TASK_KEY.test(value)) return value.toUpperCase()
+    if (name !== 'key' && isTaskKey(value)) return value.toUpperCase()
     const known = keys?.get(value)
     if (known) return known
   }
