@@ -4,6 +4,67 @@ A self-hosted workspace for teams: tasks, docs, chat, and mail in one app on
 your own server. AI clients connect over MCP and get the full context of your
 workspace without your data leaving your server.
 
+## Try Ask AI (fork)
+
+> This is a fork of [coollabsio/orbit](https://github.com/coollabsio/orbit) with one addition: **Ask AI**, an in-app
+> assistant. Everything else is upstream Orbit. It is published here so the maintainers and others can try it; it is
+> not part of upstream Orbit.
+
+**What it is.** A panel beside your page (the **Ask AI** row in the sidebar, or **Ctrl+J** / **Cmd+J**) that answers
+questions about your tasks, docs and chats and makes changes for you, through the same tools as Orbit's MCP server,
+as the signed-in member. Every change waits for your approval, and with **Follow along** on the page goes to what it
+changed. It runs on Anthropic's Claude models with **your own Anthropic API key**.
+
+**Run it.** Build and start it like upstream Orbit, from this branch:
+
+- Docker: `docker build -t orbit-ask-ai .`, then run it as in [Self-hosting with Docker](#self-hosting-with-docker)
+  with `orbit-ask-ai` in place of `ghcr.io/coollabsio/orbit:latest`.
+- From source: `just setup`, then `just dev` (or `cargo build --release -p orbit-server`; the web app is embedded).
+- Set `ORBIT_APP_KEY` (`openssl rand -base64 32`): the API key is sealed with it, and without it Orbit does not store
+  one.
+- Optional: `ORBIT_AI_ANTHROPIC_KEY` gives Ask AI a server-wide key for workspaces without their own. Every such
+  workspace then spends that key (within its daily token limit, at most `ORBIT_AI_MAX_DAILY_TOKENS`), so use it only on
+  a single-tenant server, never on a shared or cloud one.
+- As a workspace owner or admin, open **Settings → Integrations → AI**, paste your key from
+  [console.anthropic.com](https://console.anthropic.com) (API keys), click **Test**, then **Save**. Pick a model
+  (Claude Sonnet 5.5 by default) and a daily token limit. The mobile app has the same settings page; the chat panel
+  is web-only for now.
+
+**What it can do:** read tasks, projects, docs, views, databases and chat; create and update tasks, comments, docs,
+projects, labels, statuses, milestones, cycles, views and database rows (each after your approval); open pages for
+you. **What it cannot do:** delete, purge or trash anything; use mail; upload or download files; change project
+membership; send anything outside the workspace; act beyond your own access.
+
+**Security model**
+
+- Every change pauses for approval of its exact arguments, which the server stores (the browser only answers
+  approve or decline). "Allow in this chat" exists only for structured changes; anything that overwrites content or
+  carries free text Orbit renders as Markdown (comments, descriptions, docs, database cells) always asks.
+- Tool results, page context and your names reach the model marked as untrusted data inside a per-conversation
+  nonce; answers load no outside images and draw no diagrams, so injected text cannot exfiltrate data through the
+  browser.
+- The key is sealed per workspace with `ORBIT_APP_KEY`, never returned to the browser (only its last four
+  characters) and never logged. What Ask AI reads for a request is sent to Anthropic.
+- Limits: 12 model steps and 20 tool calls per message, 4 minutes per run, 20 requests a minute per member, and a
+  daily token limit per workspace (counted before each request; no request when the limits cannot be checked).
+- Writes are audited as the member with `via: "assistant"`, plus an `assistant.change` row per applied, declined
+  or failed change. Every MCP tool must carry a label in the assistant's registry (a test fails otherwise), so a new
+  upstream tool stays unavailable until someone decides.
+
+**Known limitations:** Anthropic only (the provider interface is ready for an OpenAI-compatible one, not built);
+conversations are kept 6 hours per member and are not visible to admins; the daily limit is on tokens, not money
+(set a spend limit in the Anthropic Console too); Mermaid diagrams elsewhere in Orbit (not in answers) can still
+load outside images through HTML labels; no chat panel in the mobile app yet. Details: [docs/assistant.md](docs/assistant.md).
+
+**Known upstream test failures.** `cargo test -p orbit-server --lib assistant` passes on SQLite and Postgres. Four
+tests in `apps/server/tests/mcp_api.rs` fail on this branch and fail the same way on upstream `main` (same command,
+both databases), so Ask AI does not cause them: `docs_and_chat_require_explicit_scopes_and_doc_writes_need_docs_write`,
+`mcp_route_is_mounted_in_the_application_and_rejects_oversized_bodies`,
+`tools_list_includes_required_cache_fields_for_current_protocol` and `writes_are_refused_in_a_read_only_cloud_workspace`.
+
+**How it was made.** AI-assisted: written with Claude Code (Anthropic) under human direction, reviewed by a person
+and by four independent security reviews before this branch. Upstream: [coollabsio/orbit](https://github.com/coollabsio/orbit).
+
 ## Features
 
 - **Tasks**: projects with custom workflows, list, board and timeline views,

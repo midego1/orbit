@@ -48,6 +48,8 @@ Orbit reads its configuration only from environment variables that start with `O
 | `ORBIT_APNS_TOPIC` | `io.coollabs.orbit` | The bundle ID of the iOS app. |
 | `ORBIT_FCM_SERVICE_ACCOUNT` | none (Android pushes off) | The JSON key of a Google service account of the Firebase project, for native Android push notifications. See [Android push notifications (FCM)](#android-push-notifications-fcm). |
 | `ORBIT_FCM_SERVICE_ACCOUNT_FILE` | none | The path of a file that contains the service account key, instead of `ORBIT_FCM_SERVICE_ACCOUNT`. Do not set both. |
+| `ORBIT_AI_ANTHROPIC_KEY` | none | An Anthropic API key for Ask AI in **every workspace that has no key of its own** (a workspace's key in Settings → AI always wins). Any member of such a workspace then spends this key, within the workspace's daily token limit. Use it only on a single-tenant server. See [Ask AI](assistant.md). |
+| `ORBIT_AI_MAX_DAILY_TOKENS` | `2000000` | The highest daily token limit a workspace that runs on `ORBIT_AI_ANTHROPIC_KEY` may have; its admins cannot set more. A workspace with its own key is not limited by it. |
 
 Create the app key once with `openssl rand -base64 32` and keep a copy outside the server. Orbit does not start without it. See [Email, registration and the app key](#email-registration-and-the-app-key).
 

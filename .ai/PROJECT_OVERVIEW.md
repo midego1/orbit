@@ -18,7 +18,7 @@ These routes use the production API and the database:
 
 Mail has no backend yet. Its UI in `features/mail` uses mock data, and `/mail` redirects to `/tasks`. `mail.rs` on the server sends only account email (invitations, registration, recovery).
 
-AI: there is no built-in assistant yet. AI clients use tasks and docs, and read chat, through the scoped MCP endpoint (`/mcp`, see `docs/mcp.md`).
+AI: Ask AI, the built-in assistant (`docs/assistant.md`), runs on a workspace's own Anthropic key: what it reads for a request is sent to Anthropic. It uses the same tools as the scoped MCP endpoint (`/mcp`, see `docs/mcp.md`), through which other AI clients use tasks and docs and read chat.
 
 ## Runtime shape
 
