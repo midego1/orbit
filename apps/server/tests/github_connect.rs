@@ -5,7 +5,7 @@ mod fake_github;
 
 use axum::http::StatusCode;
 use fake_github::{
-    GithubFixture, KEY, decrypt_for_test, fixture, json_body, location, query_param,
+    KEY, decrypt_for_test, fixture, json_body, location, query_param, GithubFixture,
 };
 use orbit_platform::{Row, TimestampMillis};
 use orbit_server::github::user_tokens::{TokenError, mark_broken, user_token};
@@ -37,12 +37,7 @@ fn conversion(id: i64) -> serde_json::Value {
 /// Starts a connect flow for `cookie` and returns GitHub's authorize URL.
 async fn start(fixture: &GithubFixture, cookie: &str) -> String {
     let response = fixture
-        .send(
-            "POST",
-            &me(fixture),
-            cookie,
-            Some(json!({ "client": "web" })),
-        )
+        .send("POST", &me(fixture), cookie, Some(json!({ "client": "web" })))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await["authorize_url"]
@@ -65,11 +60,7 @@ async fn callback(fixture: &GithubFixture, code: &str, state: &str) -> String {
 }
 
 /// Finishes a flow from the page the browser returned to, signed in with `cookie`: (status, body).
-async fn finish(
-    fixture: &GithubFixture,
-    back: &str,
-    cookie: &str,
-) -> (StatusCode, serde_json::Value) {
+async fn finish(fixture: &GithubFixture, back: &str, cookie: &str) -> (StatusCode, serde_json::Value) {
     let token = query_param(back, "token").expect("a finish token");
     let response = fixture
         .send(
@@ -113,9 +104,7 @@ async fn manifest_requests_review_permissions() {
 #[tokio::test]
 async fn manifest_callback_stores_client_credentials() {
     let fixture = fixture().await;
-    fixture
-        .github
-        .with(|state| state.conversion = conversion(91));
+    fixture.github.with(|state| state.conversion = conversion(91));
     register_state(&fixture, "reg-state").await;
     let response = fixture
         .send(
@@ -136,10 +125,7 @@ async fn manifest_callback_stores_client_credentials() {
         decrypt_for_test(&KEY, &row.get::<Vec<u8>, _>("client_secret_encrypted")),
         "s3cret"
     );
-    assert_eq!(
-        row.get::<String, _>("callback_origin"),
-        "https://orbit.test"
-    );
+    assert_eq!(row.get::<String, _>("callback_origin"), "https://orbit.test");
 }
 
 #[tokio::test]
@@ -148,10 +134,7 @@ async fn old_app_reports_needs_recreate() {
     fixture.seed_app(false).await;
     let settings = json_body(
         fixture
-            .get(&format!(
-                "/api/v1/workspaces/{}/github",
-                fixture.workspace()
-            ))
+            .get(&format!("/api/v1/workspaces/{}/github", fixture.workspace()))
             .await,
     )
     .await;
@@ -167,10 +150,7 @@ async fn old_app_reports_needs_recreate() {
     )
     .await;
     assert_eq!(project["needs_recreate"], true);
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "needs_recreate"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "needs_recreate");
 }
 
 #[tokio::test]
@@ -179,10 +159,7 @@ async fn current_app_does_not_need_recreate() {
     fixture.seed_app(true).await;
     let settings = json_body(
         fixture
-            .get(&format!(
-                "/api/v1/workspaces/{}/github",
-                fixture.workspace()
-            ))
+            .get(&format!("/api/v1/workspaces/{}/github", fixture.workspace()))
             .await,
     )
     .await;
@@ -194,8 +171,7 @@ async fn upgrade_adds_client_to_old_app_and_keeps_its_links() {
     let fixture = fixture().await;
     fixture.seed_app(false).await;
     let path = format!("/api/v1/workspaces/{}/github/client", fixture.workspace());
-    let send =
-        |body: serde_json::Value| fixture.send("PUT", &path, &fixture.session_cookie, Some(body));
+    let send = |body: serde_json::Value| fixture.send("PUT", &path, &fixture.session_cookie, Some(body));
     let invalid = send(json!({ "client_id": "Iv1 abc", "client_secret": "x" })).await;
     assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let saved = send(json!({ "client_id": " Iv23li.new ", "client_secret": "f00d" })).await;
@@ -210,10 +186,7 @@ async fn upgrade_adds_client_to_old_app_and_keeps_its_links() {
         decrypt_for_test(&KEY, &row.get::<Vec<u8>, _>("client_secret_encrypted")),
         "f00d"
     );
-    assert_eq!(
-        row.get::<String, _>("callback_origin"),
-        "https://orbit.test"
-    );
+    assert_eq!(row.get::<String, _>("callback_origin"), "https://orbit.test");
     let project = format!(
         "/api/v1/workspaces/{}/projects/{}/github",
         fixture.workspace(),
@@ -243,14 +216,9 @@ async fn recreate_replaces_old_app_and_its_links() {
         )
         .await;
     assert_eq!(start.status(), StatusCode::OK);
-    let action = json_body(start).await["action"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let action = json_body(start).await["action"].as_str().unwrap().to_owned();
     let registration = query_param(&action, "state").unwrap();
-    fixture
-        .github
-        .with(|state| state.conversion = conversion(92));
+    fixture.github.with(|state| state.conversion = conversion(92));
     let response = fixture
         .send(
             "GET",
@@ -268,14 +236,8 @@ async fn recreate_replaces_old_app_and_its_links() {
             .unwrap()
     };
     assert_eq!(count("SELECT COUNT(*) FROM github_installations").await, 0);
-    assert_eq!(
-        count("SELECT COUNT(*) FROM github_project_connections").await,
-        0
-    );
-    assert_eq!(
-        count("SELECT COUNT(*) FROM github_user_connections").await,
-        0
-    );
+    assert_eq!(count("SELECT COUNT(*) FROM github_project_connections").await, 0);
+    assert_eq!(count("SELECT COUNT(*) FROM github_user_connections").await, 0);
     let app_id: i64 = sqlx::query_scalar("SELECT app_id FROM github_apps WHERE workspace_id = $1")
         .bind(fixture.workspace())
         .fetch_one(pool)
@@ -303,19 +265,13 @@ async fn manifest_start_refused_when_app_is_current() {
 async fn connect_round_trip_stores_encrypted_token() {
     let fixture = fixture().await;
     fixture.seed_app(true).await;
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "disconnected"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "disconnected");
     fixture.github.with(|state| {
         state.codes.insert("code-1".into(), (1, "octo".into()));
     });
     let authorize = start(&fixture, &fixture.session_cookie).await;
     assert!(authorize.contains("/github/web/login/oauth/authorize?"));
-    assert_eq!(
-        query_param(&authorize, "client_id").as_deref(),
-        Some("Iv1.abc")
-    );
+    assert_eq!(query_param(&authorize, "client_id").as_deref(), Some("Iv1.abc"));
     assert_eq!(
         query_param(&authorize, "code_challenge_method").as_deref(),
         Some("S256")
@@ -330,10 +286,7 @@ async fn connect_round_trip_stores_encrypted_token() {
     // the page finishes in the workspace the flow started in, even if the member switched since
     assert_eq!(query_param(&back, "workspace"), Some(fixture.workspace()));
     // the callback alone connects nothing: the signed-in member must finish
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "disconnected"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "disconnected");
     let (code, body) = finish(&fixture, &back, &fixture.session_cookie).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(body["status"], "connected");
@@ -350,14 +303,8 @@ async fn connect_round_trip_stores_encrypted_token() {
     assert!(!String::from_utf8_lossy(&stored).contains("ghu_1"));
     assert_eq!(decrypt_for_test(&KEY, &stored), "ghu_1");
     let form = fixture.github.with(|state| state.token_forms[0].clone());
-    assert!(
-        form.get("code_verifier")
-            .is_some_and(|value| value.len() >= 43)
-    );
-    assert_eq!(
-        form.get("client_secret").map(String::as_str),
-        Some("s3cret")
-    );
+    assert!(form.get("code_verifier").is_some_and(|value| value.len() >= 43));
+    assert_eq!(form.get("client_secret").map(String::as_str), Some("s3cret"));
 }
 
 #[tokio::test]
@@ -370,15 +317,8 @@ async fn callback_state_is_single_use() {
     let state = query_param(&start(&fixture, &fixture.session_cookie).await, "state").unwrap();
     let back = callback(&fixture, "code-1", &state).await;
     assert!(back.contains("github=finish"));
-    assert!(
-        callback(&fixture, "code-1", &state)
-            .await
-            .ends_with("github=failed")
-    );
-    assert_eq!(
-        finish(&fixture, &back, &fixture.session_cookie).await.0,
-        StatusCode::OK
-    );
+    assert!(callback(&fixture, "code-1", &state).await.ends_with("github=failed"));
+    assert_eq!(finish(&fixture, &back, &fixture.session_cookie).await.0, StatusCode::OK);
     sqlx::query("DELETE FROM github_user_connections")
         .execute(fixture.database.pool())
         .await
@@ -407,11 +347,7 @@ async fn callback_expired_state_fails() {
         .execute(fixture.database.pool())
         .await
         .unwrap();
-    assert!(
-        callback(&fixture, "code-1", &state)
-            .await
-            .ends_with("github=failed")
-    );
+    assert!(callback(&fixture, "code-1", &state).await.ends_with("github=failed"));
 }
 
 #[tokio::test]
@@ -460,10 +396,7 @@ async fn disconnect_removes_the_connection() {
         .send("DELETE", &me(&fixture), &fixture.session_cookie, None)
         .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "disconnected"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "disconnected");
 }
 
 #[tokio::test]
@@ -472,13 +405,7 @@ async fn valid_token_is_returned_without_refresh() {
     fixture.seed_app(true).await;
     let later = TimestampMillis::now().as_millis() + 3_600_000;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(later),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(later))
         .await;
     let token = user_token(&fixture.state, &fixture.workspace_id, &fixture.user_id)
         .await
@@ -494,13 +421,7 @@ async fn expired_token_refreshes_once() {
     fixture.seed_app(true).await;
     let past = TimestampMillis::now().as_millis() - 1;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(past),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(past))
         .await;
     let token = user_token(&fixture.state, &fixture.workspace_id, &fixture.user_id)
         .await
@@ -522,13 +443,7 @@ async fn refresh_race_uses_winner_token() {
     fixture.seed_app(true).await;
     let past = TimestampMillis::now().as_millis() - 1;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(past),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(past))
         .await;
     fixture.github.with(|state| state.refresh_delay_ms = 150);
     // Two servers: each has its own process-local lock, so both refresh with the same token.
@@ -553,21 +468,12 @@ async fn refresh_failure_marks_broken() {
     fixture.seed_app(true).await;
     let past = TimestampMillis::now().as_millis() - 1;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(past),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(past))
         .await;
     fixture.github.with(|state| state.valid_refresh.clear());
     let result = user_token(&fixture.state, &fixture.workspace_id, &fixture.user_id).await;
     assert!(matches!(result, Err(TokenError::Broken)));
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "broken"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "broken");
 }
 
 #[tokio::test]
@@ -610,10 +516,7 @@ async fn mobile_return_url_must_be_allowed() {
     let state = query_param(&authorize, "state").unwrap();
     let back = callback(&fixture, "code-1", &state).await;
     assert!(back.starts_with("orbit://auth/callback?github=finish&token="));
-    assert_eq!(
-        finish(&fixture, &back, &fixture.session_cookie).await.0,
-        StatusCode::OK
-    );
+    assert_eq!(finish(&fixture, &back, &fixture.session_cookie).await.0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -628,10 +531,7 @@ async fn non_member_gets_404() {
 #[tokio::test]
 async fn no_app_reports_unavailable() {
     let fixture = fixture().await;
-    assert_eq!(
-        json_body(fixture.get(&me(&fixture)).await).await["status"],
-        "unavailable"
-    );
+    assert_eq!(json_body(fixture.get(&me(&fixture)).await).await["status"], "unavailable");
 }
 
 #[tokio::test]
@@ -697,9 +597,7 @@ async fn bad_code_fails_at_finish() {
 async fn server_without_app_key_still_reports_no_app() {
     let fixture = fixture().await;
     let app = fixture.router_without_key();
-    let response = fixture
-        .send_to(&app, "GET", &me(&fixture), &fixture.session_cookie)
-        .await;
+    let response = fixture.send_to(&app, "GET", &me(&fixture), &fixture.session_cookie).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["status"], "unavailable");
 }
@@ -710,17 +608,9 @@ async fn github_outage_during_refresh_keeps_the_connection() {
     fixture.seed_app(true).await;
     let past = TimestampMillis::now().as_millis() - 1;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(past),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(past))
         .await;
-    fixture
-        .github
-        .with(|state| state.token_reply = Some((503, json!({}))));
+    fixture.github.with(|state| state.token_reply = Some((503, json!({}))));
     let result = user_token(&fixture.state, &fixture.workspace_id, &fixture.user_id).await;
     assert!(matches!(result, Err(TokenError::Github(_))));
     let broken: i64 = sqlx::query_scalar("SELECT broken FROM github_user_connections")
@@ -736,13 +626,7 @@ async fn rejected_app_credentials_do_not_break_members() {
     fixture.seed_app(true).await;
     let past = TimestampMillis::now().as_millis() - 1;
     fixture
-        .connect(
-            fixture.user_id,
-            (1, "octo"),
-            "ghu_a",
-            Some("ghr_a"),
-            Some(past),
-        )
+        .connect(fixture.user_id, (1, "octo"), "ghu_a", Some("ghr_a"), Some(past))
         .await;
     fixture.github.with(|state| {
         state.token_reply = Some((200, json!({ "error": "incorrect_client_credentials" })));
@@ -763,29 +647,19 @@ async fn a_401_for_an_old_token_does_not_break_a_renewed_connection() {
     fixture
         .connect(fixture.user_id, (1, "octo"), "ghu_new", None, None)
         .await;
-    mark_broken(
-        &fixture.state,
-        &fixture.workspace_id,
-        &fixture.user_id,
-        "ghu_old",
-    )
-    .await
-    .ok()
-    .unwrap();
+    mark_broken(&fixture.state, &fixture.workspace_id, &fixture.user_id, "ghu_old")
+        .await
+        .ok()
+        .unwrap();
     let broken: i64 = sqlx::query_scalar("SELECT broken FROM github_user_connections")
         .fetch_one(fixture.database.pool())
         .await
         .unwrap();
     assert_eq!(broken, 0);
-    mark_broken(
-        &fixture.state,
-        &fixture.workspace_id,
-        &fixture.user_id,
-        "ghu_new",
-    )
-    .await
-    .ok()
-    .unwrap();
+    mark_broken(&fixture.state, &fixture.workspace_id, &fixture.user_id, "ghu_new")
+        .await
+        .ok()
+        .unwrap();
     let broken: i64 = sqlx::query_scalar("SELECT broken FROM github_user_connections")
         .fetch_one(fixture.database.pool())
         .await
@@ -810,10 +684,7 @@ async fn workspace_settings_list_the_connected_projects_the_member_sees() {
     fixture.seed_app(true).await;
     let path = format!("/api/v1/workspaces/{}/github", fixture.workspace());
     let settings = json_body(fixture.get(&path).await).await;
-    assert_eq!(
-        settings["connected_projects"],
-        json!([fixture.project_id.to_string()])
-    );
+    assert_eq!(settings["connected_projects"], json!([fixture.project_id.to_string()]));
     let (_, cookie) = fixture.add_member("member@example.com").await;
     sqlx::query("UPDATE projects SET private = 1 WHERE id = $1")
         .bind(fixture.project_id.to_string())

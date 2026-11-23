@@ -9,14 +9,12 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::github::pulls::{
-    self, FileContents, PullDetail, PullFile, PullFilter, PullList, PullRef, PullTaskRef,
-    PullThreads, PullTimelineItem, valid_file_path, valid_name,
+    self, FileContents, PullDetail, PullFile, PullFilter, PullList, PullRef, PullTaskRef, PullThreads,
+    PullTimelineItem, valid_file_path, valid_name,
 };
 use crate::github::user_tokens::{UserToken, mark_broken, user_token};
 use crate::github::{GithubClient, GithubError};
-use crate::integration_routes::{
-    ApiError, ApiJson, IntegrationState, github_project_access, github_workspace_access,
-};
+use crate::integration_routes::{ApiError, ApiJson, IntegrationState, github_project_access, github_workspace_access};
 use crate::repositories::project_access::user_sees_project_sql;
 
 /// Who reads which pull request, with which token.
@@ -80,10 +78,7 @@ pub(crate) async fn pull_access(
     })
 }
 
-pub(crate) fn github(
-    state: &IntegrationState,
-    request_id: Option<&RequestId>,
-) -> Result<GithubClient, ApiError> {
+pub(crate) fn github(state: &IntegrationState, request_id: Option<&RequestId>) -> Result<GithubClient, ApiError> {
     state
         .github_client()
         .cloned()
@@ -114,11 +109,10 @@ pub(crate) async fn get_github_pull(
 ) -> Result<Json<PullDetail>, ApiError> {
     let id = request_id(request.as_ref());
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
-    let mut detail =
-        match pulls::detail(&github(&state, id)?, &access.token.token, &access.pull).await {
-            Ok(detail) => detail,
-            Err(error) => return Err(github_failed(&state, &access, error, id).await),
-        };
+    let mut detail = match pulls::detail(&github(&state, id)?, &access.token.token, &access.pull).await {
+        Ok(detail) => detail,
+        Err(error) => return Err(github_failed(&state, &access, error, id).await),
+    };
     detail.tasks = linked_tasks(&state, &access, id).await?;
     Ok(Json(detail))
 }
@@ -190,15 +184,7 @@ pub(crate) async fn get_github_pull_contents(
         return Err(not_found(id));
     }
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
-    match pulls::contents(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &query.path,
-        &query.sha,
-    )
-    .await
-    {
+    match pulls::contents(&github(&state, id)?, &access.token.token, &access.pull, &query.path, &query.sha).await {
         Ok(contents) => Ok(Json(contents)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -219,12 +205,7 @@ pub(crate) async fn list_github_pull_threads(
         pulls::threads(&client, &access.token.token, &access.pull),
         reviews::pending_review(&client, &access.token.token, &access.pull),
     );
-    match threads.and_then(|threads| {
-        pending.map(|pending_review| PullThreads {
-            threads,
-            pending_review,
-        })
-    }) {
+    match threads.and_then(|threads| pending.map(|pending_review| PullThreads { threads, pending_review })) {
         Ok(result) => Ok(Json(result)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -280,15 +261,7 @@ async fn set_viewed(
         return Err(not_found(id));
     }
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
-    match pulls::set_viewed(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &path,
-        viewed,
-    )
-    .await
-    {
+    match pulls::set_viewed(&github(&state, id)?, &access.token.token, &access.pull, &path, viewed).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -332,8 +305,7 @@ pub(crate) async fn list_github_project_pulls(
     request: Option<Extension<RequestId>>,
 ) -> Result<Json<PullList>, ApiError> {
     let id = request_id(request.as_ref());
-    let (workspace_id, project_id, _) =
-        github_project_access(&state, &headers, &workspace, &project, id).await?;
+    let (workspace_id, project_id, _) = github_project_access(&state, &headers, &workspace, &project, id).await?;
     let user = state.session_user(&headers, id).await?;
     let connection = sqlx::query("SELECT repository, label FROM github_project_connections WHERE workspace_id = $1 AND project_id = $2")
         .bind(&workspace)
@@ -388,23 +360,10 @@ pub(crate) async fn list_github_project_pulls(
 // ---- writes (plan 3): comments, threads, review, merge, branch ----
 
 use crate::github::pulls::{ReviewComment, ReviewThread};
-use crate::github::reviews::{
-    self, MergePull, MergeResult, NewReviewComment, ReviewRefusal, SubmitReview, valid_node_id,
-};
+use crate::github::reviews::{self, MergePull, MergeResult, NewReviewComment, ReviewRefusal, SubmitReview, valid_node_id};
 
-fn unprocessable(
-    code: &str,
-    title: &str,
-    detail: &str,
-    request_id: Option<&RequestId>,
-) -> ApiError {
-    ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        code,
-        title,
-        detail,
-        request_id,
-    )
+fn unprocessable(code: &str, title: &str, detail: &str, request_id: Option<&RequestId>) -> ApiError {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, code, title, detail, request_id)
 }
 
 type NodePath = Path<(String, String, String, i64, String)>;
@@ -420,29 +379,11 @@ pub(crate) async fn create_github_review_comment(
     let id = request_id(request.as_ref());
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     if !body.valid() {
-        return Err(unprocessable(
-            "invalid_review_comment",
-            "Invalid comment",
-            "Give a side (LEFT or RIGHT), a line, a body and a mode (pending or single).",
-            id,
-        ));
+        return Err(unprocessable("invalid_review_comment", "Invalid comment", "Give a side (LEFT or RIGHT), a line, a body and a mode (pending or single).", id));
     }
-    match reviews::add_comment(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &body,
-    )
-    .await
-    {
+    match reviews::add_comment(&github(&state, id)?, &access.token.token, &access.pull, &body).await {
         Ok(thread) => Ok(Json(thread)),
-        Err(GithubError::Conflict(_)) => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "pull_head_changed",
-            "New commits",
-            "New commits were pushed. Refresh to comment on the latest changes.",
-            id,
-        )),
+        Err(GithubError::Conflict(_)) => Err(ApiError::new(StatusCode::CONFLICT, "pull_head_changed", "New commits", "New commits were pushed. Refresh to comment on the latest changes.", id)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
 }
@@ -457,28 +398,17 @@ pub struct CommentBody {
 
 fn check_body(body: &CommentBody, request_id: Option<&RequestId>) -> Result<(), ApiError> {
     if body.body.trim().is_empty() || body.body.len() > 65_536 {
-        return Err(unprocessable(
-            "invalid_review_comment",
-            "Invalid comment",
-            "Write a comment first.",
-            request_id,
-        ));
+        return Err(unprocessable("invalid_review_comment", "Invalid comment", "Write a comment first.", request_id));
     }
     Ok(())
 }
 
 /// The comment or thread `node` must belong to the pull request in the URL, whose project the member can see.
-async fn check_node(
-    state: &IntegrationState,
-    access: &PullAccess,
-    node: &str,
-    id: Option<&RequestId>,
-) -> Result<(), ApiError> {
+async fn check_node(state: &IntegrationState, access: &PullAccess, node: &str, id: Option<&RequestId>) -> Result<(), ApiError> {
     if !valid_node_id(node) {
         return Err(not_found(id));
     }
-    match reviews::node_in_pull(&github(state, id)?, &access.token.token, &access.pull, node).await
-    {
+    match reviews::node_in_pull(&github(state, id)?, &access.token.token, &access.pull, node).await {
         Ok(true) => Ok(()),
         Ok(false) => Err(not_found(id)),
         Err(error) => Err(github_failed(state, access, error, id).await),
@@ -497,15 +427,7 @@ pub(crate) async fn reply_github_review_thread(
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     check_node(&state, &access, &thread, id).await?;
     check_body(&body, id)?;
-    match reviews::reply(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &thread,
-        &body.body,
-    )
-    .await
-    {
+    match reviews::reply(&github(&state, id)?, &access.token.token, &access.pull, &thread, &body.body).await {
         Ok(comment) => Ok(Json(comment)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -523,14 +445,7 @@ pub(crate) async fn update_github_review_comment(
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     check_node(&state, &access, &comment, id).await?;
     check_body(&body, id)?;
-    match reviews::update_comment(
-        &github(&state, id)?,
-        &access.token.token,
-        &comment,
-        &body.body,
-    )
-    .await
-    {
+    match reviews::update_comment(&github(&state, id)?, &access.token.token, &comment, &body.body).await {
         Ok(comment) => Ok(Json(comment)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -562,8 +477,7 @@ async fn set_resolved(
     let id = request_id(request.as_ref());
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     check_node(&state, &access, &thread, id).await?;
-    match reviews::set_resolved(&github(&state, id)?, &access.token.token, &thread, resolved).await
-    {
+    match reviews::set_resolved(&github(&state, id)?, &access.token.token, &thread, resolved).await {
         Ok(thread) => Ok(Json(thread)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
@@ -599,39 +513,13 @@ pub(crate) async fn submit_github_review(
 ) -> Result<StatusCode, ApiError> {
     let id = request_id(request.as_ref());
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
-    if !matches!(
-        body.event.as_str(),
-        "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
-    ) || body.body.len() > 65_536
-    {
-        return Err(unprocessable(
-            "invalid_review",
-            "Invalid review",
-            "Choose Comment, Approve or Request changes.",
-            id,
-        ));
+    if !matches!(body.event.as_str(), "COMMENT" | "APPROVE" | "REQUEST_CHANGES") || body.body.len() > 65_536 {
+        return Err(unprocessable("invalid_review", "Invalid review", "Choose Comment, Approve or Request changes.", id));
     }
-    match reviews::submit_review(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &body,
-    )
-    .await
-    {
+    match reviews::submit_review(&github(&state, id)?, &access.token.token, &access.pull, &body).await {
         Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
-        Ok(Err(ReviewRefusal::OwnPull)) => Err(unprocessable(
-            "cannot_review_own_pull",
-            "Your own pull request",
-            "You cannot approve or request changes on your own pull request.",
-            id,
-        )),
-        Ok(Err(ReviewRefusal::Empty)) => Err(unprocessable(
-            "review_empty",
-            "Empty review",
-            "Write a summary or add comments first.",
-            id,
-        )),
+        Ok(Err(ReviewRefusal::OwnPull)) => Err(unprocessable("cannot_review_own_pull", "Your own pull request", "You cannot approve or request changes on your own pull request.", id)),
+        Ok(Err(ReviewRefusal::Empty)) => Err(unprocessable("review_empty", "Empty review", "Write a summary or add comments first.", id)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
 }
@@ -647,13 +535,7 @@ pub(crate) async fn discard_github_review(
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     match reviews::discard_review(&github(&state, id)?, &access.token.token, &access.pull).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
-        Ok(false) => Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "no_pending_review",
-            "No pending review",
-            "You have no pending review on this pull request.",
-            id,
-        )),
+        Ok(false) => Err(ApiError::new(StatusCode::NOT_FOUND, "no_pending_review", "No pending review", "You have no pending review on this pull request.", id)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
 }
@@ -668,41 +550,14 @@ pub(crate) async fn merge_github_pull(
 ) -> Result<Json<MergeResult>, ApiError> {
     let id = request_id(request.as_ref());
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
-    let sha_ok = (1..=64).contains(&body.expected_head_sha.len())
-        && body
-            .expected_head_sha
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric());
+    let sha_ok = (1..=64).contains(&body.expected_head_sha.len()) && body.expected_head_sha.bytes().all(|c| c.is_ascii_alphanumeric());
     if !matches!(body.method.as_str(), "merge" | "squash" | "rebase") || !sha_ok {
-        return Err(unprocessable(
-            "invalid_merge",
-            "Invalid merge",
-            "Choose merge, squash or rebase.",
-            id,
-        ));
+        return Err(unprocessable("invalid_merge", "Invalid merge", "Choose merge, squash or rebase.", id));
     }
-    match reviews::merge(
-        &github(&state, id)?,
-        &access.token.token,
-        &access.pull,
-        &body,
-    )
-    .await
-    {
+    match reviews::merge(&github(&state, id)?, &access.token.token, &access.pull, &body).await {
         Ok(result) => Ok(Json(result)),
-        Err(GithubError::Conflict(_)) => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "pull_head_changed",
-            "New commits",
-            "New commits were pushed. Refresh before you merge.",
-            id,
-        )),
-        Err(GithubError::MethodNotAllowed(message)) => Err(unprocessable(
-            "merge_blocked",
-            "Cannot merge",
-            &format!("GitHub says: {message}"),
-            id,
-        )),
+        Err(GithubError::Conflict(_)) => Err(ApiError::new(StatusCode::CONFLICT, "pull_head_changed", "New commits", "New commits were pushed. Refresh before you merge.", id)),
+        Err(GithubError::MethodNotAllowed(message)) => Err(unprocessable("merge_blocked", "Cannot merge", &format!("GitHub says: {message}"), id)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
 }
@@ -718,12 +573,7 @@ pub(crate) async fn delete_github_pull_branch(
     let access = pull_access(&state, &headers, &workspace, &owner, &repo, number, id).await?;
     match reviews::delete_branch(&github(&state, id)?, &access.token.token, &access.pull).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
-        Ok(false) => Err(unprocessable(
-            "branch_not_deletable",
-            "Branch stays",
-            "Only the branch of a merged pull request in this repository can be deleted here.",
-            id,
-        )),
+        Ok(false) => Err(unprocessable("branch_not_deletable", "Branch stays", "Only the branch of a merged pull request in this repository can be deleted here.", id)),
         Err(error) => Err(github_failed(&state, &access, error, id).await),
     }
 }

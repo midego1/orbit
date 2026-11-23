@@ -80,12 +80,7 @@ pub async fn authorized(
 
 /// The pull requests (`owner/repo#n`) of repositories connected to a project the session's member can see. The others
 /// stay hidden: a private project's repository and pull request numbers are not for every member of the workspace.
-pub async fn visible_pulls(
-    database: &Database,
-    workspace: Id,
-    session: Id,
-    pulls: Vec<String>,
-) -> Result<Vec<String>, sqlx::Error> {
+pub async fn visible_pulls(database: &Database, workspace: Id, session: Id, pulls: Vec<String>) -> Result<Vec<String>, sqlx::Error> {
     if pulls.is_empty() {
         return Ok(pulls);
     }
@@ -100,11 +95,7 @@ pub async fn visible_pulls(
     .await?;
     Ok(pulls
         .into_iter()
-        .filter(|pull| {
-            pull.split('#')
-                .next()
-                .is_some_and(|repository| repositories.iter().any(|seen| seen == repository))
-        })
+        .filter(|pull| pull.split('#').next().is_some_and(|repository| repositories.iter().any(|seen| seen == repository)))
         .collect())
 }
 

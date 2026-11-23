@@ -24,8 +24,8 @@ use crate::billing::WorkspaceAccess;
 use crate::billing::guard::READ_ONLY_DETAIL;
 use crate::github::{GithubClient, GithubEndpoints};
 use crate::github_user_routes::{
-    delete_github_connection, finish_github_connection, github_connection,
-    github_connection_callback, start_github_connection,
+    delete_github_connection, finish_github_connection, github_connection, github_connection_callback,
+    start_github_connection,
 };
 use crate::repositories::api_tokens::{ApiTokenError, ApiTokenRepository, ApiTokenScope};
 use crate::repositories::billing;
@@ -35,10 +35,10 @@ use crate::repositories::project_access::user_sees_project_sql;
 use crate::repositories::tasks::{
     DiscordTask, GithubWorkItem, TaskError, TaskRecord, TaskRepository,
 };
+use crate::sign_in_providers::NativeRedirects;
 use crate::secret_box::{
     decrypt_secret as decrypt_github_secret, encrypt_secret as encrypt_github_secret,
 };
-use crate::sign_in_providers::NativeRedirects;
 
 const INSTANCE: &str = "/api/public/v1/integrations/discord/events";
 const MAX_EVENT_ID_CHARS: usize = 200;
@@ -145,9 +145,7 @@ impl IntegrationState {
     }
 
     pub(crate) fn github_client(&self) -> Option<&GithubClient> {
-        self.github_settings
-            .as_ref()
-            .map(|settings| &settings.github)
+        self.github_settings.as_ref().map(|settings| &settings.github)
     }
 
     pub(crate) fn encryption_key(&self) -> Option<[u8; 32]> {
@@ -1212,25 +1210,18 @@ async fn github_webhook_from_database(
         update_github_installation(state, &workspace, &payload, &event, action, id).await?;
         return Ok(StatusCode::OK);
     }
-    let workspace_id: Id = workspace
-        .parse()
-        .map_err(|error| ApiError::internal(id).cause(error))?;
+    let workspace_id: Id = workspace.parse().map_err(|error| ApiError::internal(id).cause(error))?;
     let changed = crate::github::notify::changed_pulls(&event, &payload);
     let notice = crate::github::notify::is_notice_event(&event);
     if (notice || !changed.is_empty()) && !read_only(state, workspace_id, id).await? {
         // A notice or refresh failure must not fail the delivery: GitHub would retry it and the task sync below.
         if notice
-            && let Err(error) =
-                crate::github::notify::notify_pull_event(state, &workspace_id, &event, &payload)
-                    .await
+            && let Err(error) = crate::github::notify::notify_pull_event(state, &workspace_id, &event, &payload).await
         {
             tracing::warn!(%workspace_id, event, %error, "GitHub notice not written");
         }
         let request = id.map_or("github-webhook", RequestId::as_str);
-        if let Err(error) =
-            crate::github::notify::record_pull_changes(state, &workspace_id, &changed, request)
-                .await
-        {
+        if let Err(error) = crate::github::notify::record_pull_changes(state, &workspace_id, &changed, request).await {
             tracing::warn!(%workspace_id, event, %error, "GitHub pull request change not sent to viewers");
         }
     }

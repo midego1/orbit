@@ -430,9 +430,7 @@ async fn migrate(config: Config, command: &MigrateCommand) -> Result<String, Cli
     let mut output = format!("applied {count} migration(s)");
     if seed {
         output.push('\n');
-        output.push_str(
-            &install_seed_data(database, app_key_bytes(&config), &config.data.attachments).await?,
-        );
+        output.push_str(&install_seed_data(database, app_key_bytes(&config), &config.data.attachments).await?);
     }
     Ok(output)
 }
@@ -1101,16 +1099,9 @@ async fn install_seed_data(
     .map_err(operation)?;
     seed_chat(&database, workspace_id, user_id, member_id).await?;
     if let Some(key) = app_key {
-        crate::dev_mail_seed::seed_mail(
-            &database,
-            key,
-            attachments,
-            workspace_id,
-            user_id,
-            member_id,
-        )
-        .await
-        .map_err(|error| CliError::Operation(format!("mail seed: {error}")))?;
+        crate::dev_mail_seed::seed_mail(&database, key, attachments, workspace_id, user_id, member_id)
+            .await
+            .map_err(|error| CliError::Operation(format!("mail seed: {error}")))?;
     }
     // Development mail goes to the local Mailpit (AGENTS.md), unless a mail server is set already.
     sqlx::query(

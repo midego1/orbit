@@ -10,10 +10,7 @@ use serde_json::{Value, json};
 const PULL: &str = "acme/repo/12";
 
 fn pull_path(fixture: &GithubFixture, rest: &str) -> String {
-    format!(
-        "/api/v1/workspaces/{}/github/pulls/{PULL}{rest}",
-        fixture.workspace()
-    )
+    format!("/api/v1/workspaces/{}/github/pulls/{PULL}{rest}", fixture.workspace())
 }
 
 /// The app, the `acme/repo` link to the project, and the owner connected as GitHub user `octo` (token `ghu_user`).
@@ -67,11 +64,7 @@ async fn pull_detail_uses_user_token() {
     assert_eq!(body["checks"]["runs"][0]["name"], "ci");
     assert_eq!(body["checks"]["runs"][1]["state"], "pending");
     let requests = fixture.github.with(|state| state.api_requests.clone());
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.2 == "Bearer ghu_user")
-    );
+    assert!(requests.iter().all(|request| request.2 == "Bearer ghu_user"));
 }
 
 #[tokio::test]
@@ -79,20 +72,14 @@ async fn merge_info_maps_state_status() {
     let fixture = connected().await;
     fixture.github.graphql("query PullDetail", detail("DIRTY"));
     let body = json_body(fixture.get(&pull_path(&fixture, "")).await).await;
-    assert_eq!(
-        body["merge"]["blocked_reason"],
-        "This branch has conflicts."
-    );
+    assert_eq!(body["merge"]["blocked_reason"], "This branch has conflicts.");
 }
 
 #[tokio::test]
 async fn repo_not_connected_is_404() {
     let fixture = connected().await;
     let response = fixture
-        .get(&format!(
-            "/api/v1/workspaces/{}/github/pulls/acme/other/12",
-            fixture.workspace()
-        ))
+        .get(&format!("/api/v1/workspaces/{}/github/pulls/acme/other/12", fixture.workspace()))
         .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(fixture.github.with(|state| state.api_requests.is_empty()));
@@ -103,10 +90,7 @@ async fn bad_names_are_404() {
     let fixture = connected().await;
     for path in ["acme/repo/0", "acme/re%2Fpo/1", "acme/..%2F..%2Fuser/1"] {
         let response = fixture
-            .get(&format!(
-                "/api/v1/workspaces/{}/github/pulls/{path}",
-                fixture.workspace()
-            ))
+            .get(&format!("/api/v1/workspaces/{}/github/pulls/{path}", fixture.workspace()))
             .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
@@ -116,15 +100,10 @@ async fn bad_names_are_404() {
 async fn private_project_hidden_is_404() {
     let fixture = connected().await;
     let (member, cookie) = fixture.add_member("member@example.com").await;
-    fixture
-        .connect(member, (2, "member"), "ghu_member", None, None)
-        .await;
+    fixture.connect(member, (2, "member"), "ghu_member", None, None).await;
     fixture.github.graphql("query PullDetail", detail("CLEAN"));
     assert_eq!(
-        fixture
-            .send("GET", &pull_path(&fixture, ""), &cookie, None)
-            .await
-            .status(),
+        fixture.send("GET", &pull_path(&fixture, ""), &cookie, None).await.status(),
         StatusCode::OK
     );
     sqlx::query("UPDATE projects SET private = 1 WHERE id = $1")
@@ -133,10 +112,7 @@ async fn private_project_hidden_is_404() {
         .await
         .unwrap();
     assert_eq!(
-        fixture
-            .send("GET", &pull_path(&fixture, ""), &cookie, None)
-            .await
-            .status(),
+        fixture.send("GET", &pull_path(&fixture, ""), &cookie, None).await.status(),
         StatusCode::NOT_FOUND
     );
 }
@@ -171,11 +147,7 @@ async fn not_connected_is_409_github_not_connected() {
 
 fn search_q(request: &str) -> String {
     let url = url::Url::parse(&format!("https://x/{request}")).unwrap();
-    url.query_pairs()
-        .find(|(key, _)| key == "q")
-        .unwrap()
-        .1
-        .into_owned()
+    url.query_pairs().find(|(key, _)| key == "q").unwrap().1.into_owned()
 }
 
 fn file(index: usize, patch: bool) -> Value {
@@ -190,22 +162,14 @@ fn file(index: usize, patch: bool) -> Value {
 async fn files_paginate_and_keep_missing_patch() {
     let fixture = connected().await;
     let first: Vec<Value> = (0..100).map(|index| file(index, true)).collect();
-    fixture.github.respond(
-        "GET",
-        "repos/acme/repo/pulls/12/files?per_page=100&page=1",
-        200,
-        json!(first),
-    );
+    fixture.github.respond("GET", "repos/acme/repo/pulls/12/files?per_page=100&page=1", 200, json!(first));
     fixture.github.respond("GET", "repos/acme/repo/pulls/12/files?per_page=100&page=2", 200, json!([
         { "filename": "big.lock", "previous_filename": "old.lock", "status": "renamed", "additions": 9000, "deletions": 0 }
     ]));
-    fixture.github.graphql(
-        "query PullFiles",
-        json!({ "repository": { "pullRequest": { "files": {
+    fixture.github.graphql("query PullFiles", json!({ "repository": { "pullRequest": { "files": {
         "nodes": [{ "path": "src/file3.rs", "viewerViewedState": "VIEWED" }],
         "pageInfo": { "hasNextPage": false, "endCursor": null }
-    } } } }),
-    );
+    } } } }));
     let response = fixture.get(&pull_path(&fixture, "/files")).await;
     assert_eq!(response.status(), StatusCode::OK);
     let files = json_body(response).await;
@@ -251,13 +215,7 @@ async fn list_filters_build_search_query() {
     assert_eq!(body["next_cursor"], Value::Null);
     let request = fixture.with_requests(|requests| requests[0].1.clone());
     let q = search_q(&request);
-    for part in [
-        "is:pr",
-        "repo:acme/repo",
-        "label:\"Orbit\"",
-        "review-requested:@me",
-        "is:open",
-    ] {
+    for part in ["is:pr", "repo:acme/repo", "label:\"Orbit\"", "review-requested:@me", "is:open"] {
         assert!(q.contains(part), "{q} lacks {part}");
     }
 }
@@ -276,10 +234,7 @@ async fn outdated_thread_has_null_line() {
         }],
         "pageInfo": { "hasNextPage": false, "endCursor": null }
     } } } }));
-    fixture.github.graphql(
-        "query PendingReview",
-        json!({ "repository": { "pullRequest": { "reviews": { "nodes": [] } } } }),
-    );
+    fixture.github.graphql("query PendingReview", json!({ "repository": { "pullRequest": { "reviews": { "nodes": [] } } } }));
     let response = fixture.get(&pull_path(&fixture, "/threads")).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
@@ -295,63 +250,29 @@ async fn outdated_thread_has_null_line() {
 #[tokio::test]
 async fn contents_are_text_or_nothing() {
     let fixture = connected().await;
-    fixture.github.respond(
-        "GET",
-        "repos/acme/repo/contents/src/a.rs?ref=h1",
-        200,
-        json!({
-            "type": "file", "encoding": "base64", "size": 6, "content": "aGVsbG8K"
-        }),
-    );
-    fixture.github.respond(
-        "GET",
-        "repos/acme/repo/contents/logo.png?ref=h1",
-        200,
-        json!({
-            "type": "file", "encoding": "base64", "size": 4, "content": "/9j/4A=="
-        }),
-    );
-    let text = json_body(
-        fixture
-            .get(&pull_path(&fixture, "/contents?path=src/a.rs&ref=h1"))
-            .await,
-    )
-    .await;
+    fixture.github.respond("GET", "repos/acme/repo/contents/src/a.rs?ref=h1", 200, json!({
+        "type": "file", "encoding": "base64", "size": 6, "content": "aGVsbG8K"
+    }));
+    fixture.github.respond("GET", "repos/acme/repo/contents/logo.png?ref=h1", 200, json!({
+        "type": "file", "encoding": "base64", "size": 4, "content": "/9j/4A=="
+    }));
+    let text = json_body(fixture.get(&pull_path(&fixture, "/contents?path=src/a.rs&ref=h1")).await).await;
     assert_eq!(text["text"], "hello\n");
-    let binary = json_body(
-        fixture
-            .get(&pull_path(&fixture, "/contents?path=logo.png&ref=h1"))
-            .await,
-    )
-    .await;
+    let binary = json_body(fixture.get(&pull_path(&fixture, "/contents?path=logo.png&ref=h1")).await).await;
     assert_eq!(binary["text"], Value::Null);
 }
 
 #[tokio::test]
 async fn marking_a_file_viewed_uses_the_pull_id() {
     let fixture = connected().await;
-    fixture.github.graphql(
-        "query PullId",
-        json!({ "repository": { "pullRequest": { "id": "PR_1" } } }),
-    );
-    fixture.github.graphql(
-        "mutation MarkViewed",
-        json!({ "markFileAsViewed": { "clientMutationId": null } }),
-    );
+    fixture.github.graphql("query PullId", json!({ "repository": { "pullRequest": { "id": "PR_1" } } }));
+    fixture.github.graphql("mutation MarkViewed", json!({ "markFileAsViewed": { "clientMutationId": null } }));
     let response = fixture
-        .send(
-            "PUT",
-            &pull_path(&fixture, "/viewed"),
-            &fixture.session_cookie,
-            Some(json!({ "path": "src/a.rs" })),
-        )
+        .send("PUT", &pull_path(&fixture, "/viewed"), &fixture.session_cookie, Some(json!({ "path": "src/a.rs" })))
         .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let requests = fixture.github.graphql_requests();
-    let (_, variables) = requests
-        .iter()
-        .find(|(query, _)| query.contains("mutation MarkViewed"))
-        .unwrap();
+    let (_, variables) = requests.iter().find(|(query, _)| query.contains("mutation MarkViewed")).unwrap();
     assert_eq!(variables["pullId"], "PR_1");
     assert_eq!(variables["path"], "src/a.rs");
 }
@@ -384,26 +305,16 @@ fn search_item(number: i64, repository: &str) -> Value {
 #[tokio::test]
 async fn search_text_cannot_reach_other_repositories() {
     let fixture = connected().await;
-    fixture.github.respond(
-        "GET",
-        "search/issues",
-        200,
-        json!({ "total_count": 2, "items": [
+    fixture.github.respond("GET", "search/issues", 200, json!({ "total_count": 2, "items": [
         search_item(1, "acme/repo"), search_item(2, "acme/secret")
-    ] }),
-    );
+    ] }));
     let path = format!(
         "/api/v1/workspaces/{}/projects/{}/github/pulls?q=repo:acme/secret%20login",
         fixture.workspace(),
         fixture.project_id
     );
     let body = json_body(fixture.get(&path).await).await;
-    let numbers: Vec<i64> = body["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["number"].as_i64().unwrap())
-        .collect();
+    let numbers: Vec<i64> = body["items"].as_array().unwrap().iter().map(|item| item["number"].as_i64().unwrap()).collect();
     assert_eq!(numbers, vec![1]);
     let q = search_q(&fixture.with_requests(|requests| requests[0].1.clone()));
     assert!(!q.contains("acme/secret"), "{q}");
@@ -413,22 +324,13 @@ async fn search_text_cannot_reach_other_repositories() {
 #[tokio::test]
 async fn a_trashed_project_does_not_turn_on_the_label_filter() {
     let fixture = connected().await;
-    fixture.github.respond(
-        "GET",
-        "search/issues",
-        200,
-        json!({ "total_count": 0, "items": [] }),
-    );
+    fixture.github.respond("GET", "search/issues", 200, json!({ "total_count": 0, "items": [] }));
     let other = orbit_platform::Id::new_v7().to_string();
     sqlx::query("INSERT INTO projects (id, workspace_id, name, project_key, color, created_at, updated_at, deleted_at) VALUES ($1, $2, 'Old', 'OLD', '#ff0000', 0, 0, 1)")
         .bind(&other).bind(fixture.workspace()).execute(fixture.database.pool()).await.unwrap();
     sqlx::query("INSERT INTO github_project_connections (project_id, workspace_id, installation_id, repository, label) VALUES ($1, $2, 1234, 'acme/repo', 'Old')")
         .bind(&other).bind(fixture.workspace()).execute(fixture.database.pool()).await.unwrap();
-    let path = format!(
-        "/api/v1/workspaces/{}/projects/{}/github/pulls",
-        fixture.workspace(),
-        fixture.project_id
-    );
+    let path = format!("/api/v1/workspaces/{}/projects/{}/github/pulls", fixture.workspace(), fixture.project_id);
     assert_eq!(fixture.get(&path).await.status(), StatusCode::OK);
     assert!(!search_q(&fixture.with_requests(|requests| requests[0].1.clone())).contains("label:"));
 }
@@ -437,12 +339,7 @@ async fn a_trashed_project_does_not_turn_on_the_label_filter() {
 async fn merge_base_comes_from_the_compare_of_base_and_head() {
     let fixture = connected().await;
     fixture.github.graphql("query PullDetail", detail("CLEAN"));
-    fixture.github.respond(
-        "GET",
-        "repos/acme/repo/compare/b0...h1?per_page=1",
-        200,
-        json!({ "merge_base_commit": { "sha": "m0" }, "files": [] }),
-    );
+    fixture.github.respond("GET", "repos/acme/repo/compare/b0...h1?per_page=1", 200, json!({ "merge_base_commit": { "sha": "m0" }, "files": [] }));
     let response = fixture.get(&pull_path(&fixture, "/merge-base")).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["sha"], "m0");
@@ -452,15 +349,7 @@ async fn merge_base_comes_from_the_compare_of_base_and_head() {
 async fn graphql_asks_for_merge_state_previews() {
     let fixture = connected().await;
     fixture.github.graphql("query PullDetail", detail("CLEAN"));
-    assert_eq!(
-        fixture.get(&pull_path(&fixture, "")).await.status(),
-        StatusCode::OK
-    );
+    assert_eq!(fixture.get(&pull_path(&fixture, "")).await.status(), StatusCode::OK);
     let accepts = fixture.github.with(|state| state.graphql_accepts.clone());
-    assert!(
-        accepts
-            .iter()
-            .all(|accept| accept.contains("application/vnd.github.merge-info-preview+json")),
-        "{accepts:?}"
-    );
+    assert!(accepts.iter().all(|accept| accept.contains("application/vnd.github.merge-info-preview+json")), "{accepts:?}");
 }

@@ -200,8 +200,7 @@ pub async fn user_token(
     match renewed {
         Ok(tokens) => {
             let now = TimestampMillis::now().as_millis();
-            let access =
-                encrypt_secret(&key, &tokens.access_token).map_err(|_| TokenError::Database)?;
+            let access = encrypt_secret(&key, &tokens.access_token).map_err(|_| TokenError::Database)?;
             let refresh = tokens
                 .refresh_token
                 .as_deref()
