@@ -867,7 +867,7 @@ impl Authorized<'_> {
         } else {
             self.api.tasks.as_ref().clone()
         };
-        tasks
+        let tasks = tasks
             .with_project_grant(self.principal.project_ids.clone())
             .with_token(TokenActor {
                 token_id: self.principal.token_id,
@@ -877,7 +877,12 @@ impl Authorized<'_> {
                     .as_ref()
                     .map(|account| (account.id, account.name.clone())),
             })
-            .with_revisions()
+            .with_revisions();
+        if self.request_id == crate::assistant::REQUEST_ID {
+            tasks.via_assistant()
+        } else {
+            tasks
+        }
     }
 
     /// The public form of `tasks`, with the identifiers built from the approved projects' keys.

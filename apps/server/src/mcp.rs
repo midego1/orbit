@@ -103,7 +103,12 @@ pub fn router(state: McpState, public_origin: &str) -> Router {
         .with_max_request_body_bytes(MAX_REQUEST_BODY_BYTES);
     let api = state.api.clone().with_web_origin(public_origin);
     let service = StreamableHttpService::new(
-        move || Ok(TaskTools { api: api.clone() }),
+        move || {
+            Ok(TaskTools {
+                api: api.clone(),
+                request_id: "mcp",
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     );
@@ -177,8 +182,32 @@ struct Workspaces(Vec<ApiTokenPrincipal>);
 const WORKSPACE_ARGUMENT: &str = "workspace_id";
 
 #[derive(Clone)]
-struct TaskTools {
+pub(crate) struct TaskTools {
     api: TokenApi,
+    /// The audit `request_id` of the writes: `mcp`, or `assistant` for Ask AI.
+    request_id: &'static str,
+}
+
+/// Ask AI (`crate::assistant`) runs the same tools in-process, as the signed-in user, without
+/// the rmcp request context. Its writes are audited with `request_id` `assistant`.
+impl TaskTools {
+    pub(crate) fn in_process(api: TokenApi, request_id: &'static str) -> Self {
+        Self { api, request_id }
+    }
+
+    pub(crate) async fn call_in_process(
+        &self,
+        principal: ApiTokenPrincipal,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run(std::slice::from_ref(&principal), request).await
+    }
+}
+
+/// Every tool definition: the MCP list, and the source of Ask AI's registry
+/// (`crate::assistant::registry`).
+pub(crate) fn all_tools() -> Vec<Tool> {
+    tools()
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -932,6 +961,24 @@ impl TaskTools {
     ) -> Result<CallToolResult, ErrorData> {
         let all = workspaces(&context)?;
         let principal = select_workspace(all, &mut request)?;
+        self.run_for(all, principal, request).await
+    }
+
+    async fn run(
+        &self,
+        all: &[ApiTokenPrincipal],
+        mut request: CallToolRequestParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let principal = select_workspace(all, &mut request)?;
+        self.run_for(all, principal, request).await
+    }
+
+    async fn run_for(
+        &self,
+        all: &[ApiTokenPrincipal],
+        principal: &ApiTokenPrincipal,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let Some(scope) = required_scope(&request.name) else {
             let _: EmptyArgs = arguments(&request)?;
             return match self.api.me(principal, all).await {
@@ -939,7 +986,7 @@ impl TaskTools {
                 Err(error) => tool_error(error),
             };
         };
-        let api = match self.api.authorize(principal, scope, "mcp").await {
+        let api = match self.api.authorize(principal, scope, self.request_id).await {
             Ok(api) => api,
             Err(error) => return tool_error(error),
         };

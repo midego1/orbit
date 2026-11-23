@@ -38,6 +38,8 @@ pub struct ApiRoutes {
     /// Orbit Cloud billing: its routes and the read-only guard. `None` on a self-hosted server.
     pub billing: Option<crate::billing::Billing>,
     pub mcp: Router,
+    /// Ask AI (`crate::assistant`).
+    pub assistant: Router,
     /// `/api/public/v1`, for API tokens.
     pub public_api: Router,
     pub oauth: Router,
@@ -84,6 +86,7 @@ pub fn production_router(
     let cookie_mode = api.tasks.cookie_mode;
     let router = auth_router(api.auth)
         .merge(api.mcp)
+        .merge(api.assistant)
         .merge(api.public_api)
         .merge(api.oauth)
         .merge(realtime)

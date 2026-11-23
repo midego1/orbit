@@ -1,6 +1,7 @@
 pub mod app;
 pub mod asana;
 pub mod asana_import_routes;
+pub mod assistant;
 pub mod attachment_routes;
 pub mod audit;
 pub mod auth_routes;

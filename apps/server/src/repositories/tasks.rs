@@ -640,6 +640,8 @@ pub struct TaskRepository {
     revisions: bool,
     /// An import (`tasks:import` token): writes notify nobody and run no sub-issue automation.
     importing: bool,
+    /// Ask AI made the write for the signed-in member: audited as theirs, `via: "assistant"`.
+    via_assistant: bool,
 }
 
 impl TaskRepository {
@@ -664,6 +666,16 @@ impl TaskRepository {
     pub fn with_revisions(self) -> Self {
         Self {
             revisions: true,
+            ..self
+        }
+    }
+
+    /// Writes made by Ask AI for the signed-in member (`crate::assistant`): their audit rows
+    /// name the member and carry `via: "assistant"` instead of a token.
+    #[must_use]
+    pub fn via_assistant(self) -> Self {
+        Self {
+            via_assistant: true,
             ..self
         }
     }
@@ -712,6 +724,10 @@ impl TaskRepository {
     /// The audit actor and metadata of a write: the person, or for a service-account token none,
     /// with the token and service account named in `metadata`.
     fn attribution(&self, actor_id: Id, mut metadata: Value) -> (Option<Id>, Value) {
+        if self.via_assistant {
+            metadata["via"] = json!("assistant");
+            return (Some(actor_id), metadata);
+        }
         let Some(token) = &self.token else {
             return (Some(actor_id), metadata);
         };
@@ -850,6 +866,7 @@ impl TaskRepository {
             token: None,
             revisions: false,
             importing: false,
+            via_assistant: false,
         }
     }
 

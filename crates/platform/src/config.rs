@@ -77,8 +77,9 @@ const FCM_SERVICE_ACCOUNT_FILE_ENV: &str = "ORBIT_FCM_SERVICE_ACCOUNT_FILE";
 /// The bundle id of the Orbit iOS app.
 const APNS_DEFAULT_TOPIC: &str = "io.coollabs.orbit";
 const STRIPE_API_BASE: &str = "https://api.stripe.com";
-/// Variables that scripts and tests use, not the server.
-const IGNORED_ENV_PREFIXES: [&str; 2] = ["ORBIT_DEV_", "ORBIT_TEST_"];
+/// Variables the config does not read: those of scripts and tests, development switches, and Ask AI's
+/// (`ORBIT_AI_*`, read by `apps/server/src/assistant`).
+const IGNORED_ENV_PREFIXES: [&str; 3] = ["ORBIT_DEV_", "ORBIT_TEST_", "ORBIT_AI_"];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Config {

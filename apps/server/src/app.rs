@@ -577,6 +577,27 @@ impl App {
         let router = metrics.instrument(production_router(
             ApiRoutes {
                 billing: billing.clone(),
+                // Ask AI (src/assistant): the in-app assistant, acting through the MCP tools.
+                assistant: crate::assistant::router(crate::assistant::AssistantState::new(
+                    Arc::clone(&identity),
+                    cookie_mode,
+                    crate::mcp::TaskTools::in_process(
+                        crate::token_api::TokenApi::new(Arc::new(TaskRepository::new(
+                            database.clone(),
+                        )))
+                        .with_pages(Arc::new(crate::repositories::pages::PageRepository::new(
+                            database.clone(),
+                        )))
+                        .with_chat(Arc::new(crate::repositories::chat::ChatRepository::new(
+                            database.clone(),
+                            attachment_state.uploads.clone(),
+                        )))
+                        .with_web_origin(&config.http.public_origin),
+                        crate::assistant::REQUEST_ID,
+                    ),
+                    app_key,
+                    config.environment,
+                )),
                 mcp: crate::mcp::router(
                     crate::mcp::McpState::new(
                         Arc::new(ApiTokenRepository::new(database.clone())),
