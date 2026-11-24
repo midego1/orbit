@@ -61,8 +61,9 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   sends only each mention's kind and id (context entry `mentions`, at most 10, only those still named in the text).
   The server reads each one again through the same tools as the model, as the member
   (`apps/server/src/assistant/mentions.rs`): an id they cannot see, or that does not exist, is dropped. The model
-  gets Orbit's own names and ids (`task ENG-12 "Fix login" (task id …)`), marked as untrusted data; a name the
-  client sent is never used. The sent message shows its mentions as chips, as plain text.
+  gets Orbit's own names and ids (`task "ENG-12" "Fix login" (task id …)`), marked as untrusted data; a name the
+  client sent is never used. The reads run together before the first model step; Stop ends them, and after 10
+  seconds the message goes without its mentions. The sent message shows its mentions as chips, as plain text.
 - **Stop** ends the run at once; **New chat** starts over (the old conversation is deleted).
 - The mobile app has **Settings → AI** (key, Test, Save, model, daily limit, usage); the chat panel itself is on the
   web only for now.
