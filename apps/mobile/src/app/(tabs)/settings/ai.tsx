@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { View } from 'react-native'
 
 import { ConfirmDialog, type ConfirmRequest } from '../../../components/settings/Dialog'
+import { CheckRow } from '../../../components/settings/ProjectPicker'
 import { FieldLabel, Note, Select, SettingsCard, SettingsShell, WORKSPACE_NAV } from '../../../components/settings/Shell'
 import * as api from '../../../data/ai-settings-api'
 import { useOrbit } from '../../../orbit-context'
@@ -26,7 +27,7 @@ export default function AiSettingsScreen() {
         </SettingsCard>
       ) : settings.data ? (
         <>
-          <KeyCard key={`${settings.data.model}:${settings.data.key.last4 ?? ''}:${settings.data.dailyTokenCap}`} settings={settings.data} />
+          <KeyCard key={`${settings.data.model}:${settings.data.key.last4 ?? ''}:${settings.data.dailyTokenCap}:${settings.data.allowedModels.join(',')}`} settings={settings.data} />
           <UsageCard settings={settings.data} />
         </>
       ) : (
@@ -56,6 +57,8 @@ function KeyCard({ settings }: { settings: api.AiSettings }) {
   const remove = useMutation({ mutationFn: () => api.removeAiKey(client, workspaceId), onSuccess: stored })
   const test = useMutation({ mutationFn: (apiKey?: string) => api.testAiKey(client, workspaceId, apiKey) })
   const [model, setModel] = useState(settings.model)
+  // the models members may pick per chat, besides the workspace's model (which is always allowed)
+  const [allowed, setAllowed] = useState(() => api.chatModelsToSave(settings.allowedModels, settings.model))
   const [apiKey, setApiKey] = useState('')
   const [cap, setCap] = useState(String(settings.dailyTokenCap))
   const [message, setMessage] = useState<{ text: string; error: boolean }>()
@@ -71,7 +74,7 @@ function KeyCard({ settings }: { settings: api.AiSettings }) {
     }
     setMessage(undefined)
     save.mutate(
-      { model, dailyTokenCap, ...(typed ? { apiKey: typed } : {}) },
+      { model, dailyTokenCap, allowedModels: api.chatModelsToSave(allowed, model), ...(typed ? { apiKey: typed } : {}) },
       {
         onSuccess: () => {
           setApiKey('')
@@ -114,6 +117,27 @@ function KeyCard({ settings }: { settings: api.AiSettings }) {
         <View className="gap-1.5">
           <LabelTip label="Model" text="Sonnet suits most work. Opus is the most capable and costs about twice as much; Haiku is the fastest and cheapest." />
           <Select label="Model" value={model} options={options} onChange={setModel} />
+        </View>
+        <View className="gap-2">
+          <LabelTip
+            label="Models members may pick per chat"
+            text="Members pick one of these for a chat with /model or the model menu in the Ask AI panel (on the web). The model above is always allowed and is what a new chat uses. If you take a model off the list, chats that use it go back to the model above on their next message, and the member is told."
+          />
+          {settings.models.map((value) => {
+            const isDefault = value === model
+            return (
+              <CheckRow
+                key={value}
+                label={`${api.MODEL_NAMES[value] ?? value}${isDefault ? " (the workspace's model)" : ''}`}
+                checked={isDefault || allowed.includes(value)}
+                muted={isDefault}
+                onPress={() => {
+                  if (isDefault) return
+                  setAllowed(allowed.includes(value) ? allowed.filter((other) => other !== value) : [...allowed, value])
+                }}
+              />
+            )
+          })}
         </View>
         <Input
           label="Daily token limit"
