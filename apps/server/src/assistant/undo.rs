@@ -230,7 +230,11 @@ async fn undo_one<T: ToolRunner>(
             )
             .await
         {
-            Ok(children) if children["items"].as_array().is_some_and(|items| !items.is_empty()) => {
+            Ok(children)
+                if children["items"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty()) =>
+            {
                 return Err(Failure::Conflict(format!(
                     "{} has sub-issues now, so it was not moved to the trash. Delete it yourself if you want it gone.",
                     name(record)
@@ -293,7 +297,9 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
     let mut results = Vec::new();
     let mut positions = Vec::new();
     for id in ids {
-        if results.iter().any(|result: &Value| result["id"] == id.as_str())
+        if results
+            .iter()
+            .any(|result: &Value| result["id"] == id.as_str())
             || positions
                 .iter()
                 .any(|(_, known): &(usize, String)| known == id)
@@ -312,11 +318,20 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
     for (position, id) in positions {
         let record = state.undo[position].clone();
         let refusal = match record.state {
-            _ if broken => Some(("failed", "Not undone: the conversation could not be saved. Try again.".to_owned())),
-            UndoState::Undone => Some(("already_undone", "This change was already undone.".to_owned())),
+            _ if broken => Some((
+                "failed",
+                "Not undone: the conversation could not be saved. Try again.".to_owned(),
+            )),
+            UndoState::Undone => Some((
+                "already_undone",
+                "This change was already undone.".to_owned(),
+            )),
             UndoState::Undoing => Some((
                 "uncertain",
-                format!("An earlier undo of this change was cut off. Check {} before you try anything else.", name(&record)),
+                format!(
+                    "An earlier undo of this change was cut off. Check {} before you try anything else.",
+                    name(&record)
+                ),
             )),
             UndoState::Conflict => Some(("conflict", changed_since(&record))),
             UndoState::Available if now > record.expires_at => Some((
@@ -366,11 +381,15 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
             }
             Err(Failure::Conflict(message)) => {
                 state.undo[position].state = UndoState::Conflict;
-                results.push(json!({"id": id, "outcome": "conflict", "attempted": true, "message": message}));
+                results.push(
+                    json!({"id": id, "outcome": "conflict", "attempted": true, "message": message}),
+                );
             }
             Err(Failure::Retry(message)) => {
                 state.undo[position].state = UndoState::Available;
-                results.push(json!({"id": id, "outcome": "failed", "attempted": true, "message": message}));
+                results.push(
+                    json!({"id": id, "outcome": "failed", "attempted": true, "message": message}),
+                );
             }
         }
     }

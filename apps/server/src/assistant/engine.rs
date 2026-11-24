@@ -370,8 +370,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             .await;
         // nothing was shown in it (a decline): no empty message on reload
         if let Some(position) = state.display.iter().position(|message| {
-            message["id"] == message_id
-                && message["toolCalls"].as_array().is_none_or(Vec::is_empty)
+            message["id"] == message_id && message["toolCalls"].as_array().is_none_or(Vec::is_empty)
         }) {
             state.display.remove(position);
         }
@@ -457,10 +456,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 skipped += 1;
                 lines.push(format!("- {label}: NOT run ({reason})."));
                 items.push(json!({"id": item.id, "tool": item.tool, "outcome": "skipped", "reason": reason}));
-                state
-                    .turn
-                    .changes
-                    .push(cards::outcome_entry(
+                state.turn.changes.push(cards::outcome_entry(
                     &item.tool,
                     &item.input,
                     &item.subject,
@@ -492,11 +488,10 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 stopped = Some("an earlier change of the batch failed");
                 let error = error_text(&result.client);
                 lines.push(format!("- {label}: FAILED. {}", result.model));
-                items.push(json!({"id": item.id, "tool": item.tool, "outcome": "failed", "error": error}));
-                state
-                    .turn
-                    .changes
-                    .push(cards::outcome_entry(
+                items.push(
+                    json!({"id": item.id, "tool": item.tool, "outcome": "failed", "error": error}),
+                );
+                state.turn.changes.push(cards::outcome_entry(
                     &item.tool,
                     &item.input,
                     &item.subject,
@@ -913,7 +908,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         input: &Value,
     ) -> Result<(Vec<BatchItem>, Risk), String> {
         let Some(changes) = input["changes"].as_array() else {
-            return Err("Not run: propose_changes needs `changes`, a list of {tool, input}.".into());
+            return Err(
+                "Not run: propose_changes needs `changes`, a list of {tool, input}.".into(),
+            );
         };
         if changes.is_empty() || changes.len() > MAX_BATCH {
             return Err(format!(
@@ -928,11 +925,12 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             let number = index + 1;
             let tool = change["tool"].as_str().unwrap_or_default();
             let available = self.registry.get(tool).is_some_and(|def| {
-                def.label.exposure == registry::Exposure::Core
-                    || state.loaded_tools.contains(tool)
+                def.label.exposure == registry::Exposure::Core || state.loaded_tools.contains(tool)
             });
             match (self.registry.risk(tool), &change["input"]) {
-                (Some(item_risk @ (Risk::Write | Risk::Dangerous)), Value::Object(_)) if available => {
+                (Some(item_risk @ (Risk::Write | Risk::Dangerous)), Value::Object(_))
+                    if available =>
+                {
                     if item_risk == Risk::Dangerous {
                         risk = Risk::Dangerous;
                     }
@@ -1001,7 +999,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             )
             .await
             {
-                item.subject = json!({"key": preview["task"]["key"], "title": preview["task"]["title"]});
+                item.subject =
+                    json!({"key": preview["task"]["key"], "title": preview["task"]["title"]});
                 entry["preview"] = preview;
             }
             shown.push(entry);
@@ -1218,7 +1217,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 }
                 state.turn.changes.push(entry);
                 let mut result = success(nonce, name, &value);
-                if mode == ChangeMode::Carded && let Some(url) = url {
+                if mode == ChangeMode::Carded
+                    && let Some(url) = url
+                {
                     let note = self.navigate(state, message_id, &url).await;
                     result = with_note(result, &note);
                 }
@@ -1520,9 +1521,10 @@ pub(crate) fn provider_error_text(error: &ProviderError, model: &str) -> String 
 fn valid_selection(batch: &[BatchItem], ids: &[String]) -> bool {
     !ids.is_empty()
         && ids.len() <= batch.len()
-        && ids.iter().enumerate().all(|(at, id)| {
-            batch.iter().any(|item| item.id == *id) && !ids[..at].contains(id)
-        })
+        && ids
+            .iter()
+            .enumerate()
+            .all(|(at, id)| batch.iter().any(|item| item.id == *id) && !ids[..at].contains(id))
 }
 
 /// The error text of a failed call as the panel got it (`{"error": …}`), without the untrusted-data wrapper, cut for

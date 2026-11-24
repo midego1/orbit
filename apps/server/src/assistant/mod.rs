@@ -352,7 +352,9 @@ fn with_undo_states(messages: &mut [Value], state: &ConversationState, now: Time
                 .undo
                 .iter()
                 .find(|record| record.id == id)
-                .map_or("expired", |record| undo::state_word(record, now.as_millis()));
+                .map_or("expired", |record| {
+                    undo::state_word(record, now.as_millis())
+                });
             change["undo"]["state"] = json!(word);
         }
         message["content"] = json!(view.to_string());
@@ -610,7 +612,12 @@ pub(crate) async fn undo_for(
     // the state as the last run saved it
     let fresh = match state
         .store
-        .get(conversation_id, member.workspace_id, member.user_id, TimestampMillis::now())
+        .get(
+            conversation_id,
+            member.workspace_id,
+            member.user_id,
+            TimestampMillis::now(),
+        )
         .await
     {
         Ok(Some(fresh)) => fresh,
@@ -655,7 +662,13 @@ pub(crate) async fn undo_for(
     };
     if let Err(error) = state
         .store
-        .save(&fresh, &conversation_state, &lease, true, TimestampMillis::now())
+        .save(
+            &fresh,
+            &conversation_state,
+            &lease,
+            true,
+            TimestampMillis::now(),
+        )
         .await
     {
         tracing::warn!(%error, "assistant conversation could not be saved after an undo");
@@ -669,7 +682,14 @@ pub(crate) async fn undo_for(
             .is_some()
         {
             let outcome = result["outcome"].as_str().unwrap_or("failed");
-            audit_undo(state, member.workspace_id, member.user_id, fresh.id, outcome).await;
+            audit_undo(
+                state,
+                member.workspace_id,
+                member.user_id,
+                fresh.id,
+                outcome,
+            )
+            .await;
         }
     }
     Ok(results)
@@ -683,7 +703,6 @@ struct UndoMember {
 fn unavailable() -> Response {
     problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
 }
-
 
 async fn audit_undo(
     state: &AssistantState,
@@ -765,9 +784,10 @@ fn parse_input(input: &RunInput) -> Result<Input, &'static str> {
             Value::Null => None,
             Value::Array(ids)
                 if ids.len() <= 50
-                    && ids
-                        .iter()
-                        .all(|id| id.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 64)) =>
+                    && ids.iter().all(|id| {
+                        id.as_str()
+                            .is_some_and(|id| !id.is_empty() && id.len() <= 64)
+                    }) =>
             {
                 Some(
                     ids.iter()
