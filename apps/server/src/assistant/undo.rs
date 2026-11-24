@@ -256,12 +256,31 @@ async fn undo_one<T: ToolRunner>(
             )
             .await
             .map(|_| None);
-        if deleted.is_ok() && trashed_with_sub_issues(tools, &record.task_id).await {
-            // a sub-issue was added between the check and the delete: put it all back as it was
-            return Err(Failure::Conflict(format!(
-                "{} got sub-issues while it was being undone, so it was put back from the trash. Delete it yourself if you want it gone.",
-                name(record)
-            )));
+        if deleted.is_ok() {
+            match trash_check(tools, &record.task_id).await {
+                TrashCheck::Alone => {}
+                // a sub-issue was added between the check and the delete: put it all back as it was
+                TrashCheck::Restored => {
+                    return Err(Failure::Conflict(format!(
+                        "{} got sub-issues while it was being undone, so it was put back from the trash. Delete it yourself if you want it gone.",
+                        name(record)
+                    )));
+                }
+                // the task is in the trash, but whether sub-issues went with it is not known (or they could not be
+                // brought back): never reported as a clean undo
+                TrashCheck::RestoreFailed => {
+                    return Err(Failure::Conflict(format!(
+                        "{} got sub-issues while it was being undone and went to the trash with them; Orbit could not put it back. Check the trash and restore it there if you need them.",
+                        name(record)
+                    )));
+                }
+                TrashCheck::Unknown => {
+                    return Err(Failure::Conflict(format!(
+                        "{} was moved to the trash, but Orbit could not check whether sub-issues went with it. Check the trash.",
+                        name(record)
+                    )));
+                }
+            }
         }
         deleted
     } else {
@@ -291,9 +310,21 @@ async fn undo_one<T: ToolRunner>(
     })
 }
 
+enum TrashCheck {
+    /// The task went to the trash alone.
+    Alone,
+    /// Sub-issues went with it, and the task was restored with them.
+    Restored,
+    /// Sub-issues went with it, and the restore failed.
+    RestoreFailed,
+    /// The trash could not be read, or the task was not found in it (only its first 3 pages of 100, newest first,
+    /// are searched: a task trashed a moment ago is on the first one, so "not found" means something else happened).
+    Unknown,
+}
+
 /// After an undo moved a task to the trash: whether sub-issues went with it (one was added after the check). If so,
-/// the task is restored with them, and `true` is returned. A trash that cannot be read counts as none.
-async fn trashed_with_sub_issues<T: ToolRunner>(tools: &T, task_id: &str) -> bool {
+/// the task is restored with them.
+async fn trash_check<T: ToolRunner>(tools: &T, task_id: &str) -> TrashCheck {
     let mut cursor: Option<String> = None;
     // the newest trash comes first; a few pages at most
     for _ in 0..3 {
@@ -302,7 +333,7 @@ async fn trashed_with_sub_issues<T: ToolRunner>(tools: &T, task_id: &str) -> boo
             input["cursor"] = json!(cursor);
         }
         let Ok(page) = tools.lookup("list_task_trash", input).await else {
-            return false;
+            return TrashCheck::Unknown;
         };
         if let Some(item) = page["items"]
             .as_array()
@@ -311,7 +342,7 @@ async fn trashed_with_sub_issues<T: ToolRunner>(tools: &T, task_id: &str) -> boo
             .find(|item| item["id"] == task_id)
         {
             if item["trashed_descendant_count"].as_i64().unwrap_or(0) == 0 {
-                return false;
+                return TrashCheck::Alone;
             }
             let restored = tools
                 .call(
@@ -319,14 +350,18 @@ async fn trashed_with_sub_issues<T: ToolRunner>(tools: &T, task_id: &str) -> boo
                     json!({"task_id": task_id, "expected_version": item["version"]}),
                 )
                 .await;
-            return restored.is_ok();
+            return if restored.is_ok() {
+                TrashCheck::Restored
+            } else {
+                TrashCheck::RestoreFailed
+            };
         }
         cursor = page["next_cursor"].as_str().map(str::to_owned);
         if cursor.is_none() {
-            return false;
+            return TrashCheck::Unknown;
         }
     }
-    false
+    TrashCheck::Unknown
 }
 
 /// Undoes the records `ids` names (newest first, so "Undo all" can take back two changes to the same task), with the

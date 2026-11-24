@@ -1477,6 +1477,18 @@ pub(crate) fn client_view(value: &Value) -> String {
     Value::Object(compact).to_string()
 }
 
+/// The changes a waiting approval holds (each item of a batch, or the single change): what retiring the chat drops
+/// unanswered, audited as declined.
+pub(crate) fn pending_changes(state: &ConversationState) -> Vec<String> {
+    match &state.pending {
+        Some(Pending {
+            batch: Some(items), ..
+        }) => items.iter().map(|item| item.tool.clone()).collect(),
+        Some(pending) => vec![pending.name.clone()],
+        None => Vec::new(),
+    }
+}
+
 /// Closes a conversation the member switches away from (New chat, or continuing another one): the
 /// approval that waits expires for good (its call and the calls queued after it are answered as not
 /// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
