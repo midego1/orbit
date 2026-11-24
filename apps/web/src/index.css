@@ -792,8 +792,8 @@ html .bn-mobile-formatting-toolbar {
      keeps away from the travelling light */
   --assistant-edge-line: 3px;
   --assistant-edge-glow: 36px;
-  --assistant-edge-glow-strength: 0.45;
-  --assistant-edge-floor: 32%;
+  --assistant-edge-glow-strength: 0.6;
+  --assistant-edge-floor: 22%;
   /* one lap of the light around the window */
   --assistant-orbit-thinking: 7s;
   --assistant-orbit-changing: 4.2s;
@@ -818,7 +818,8 @@ html .bn-mobile-formatting-toolbar {
   --assistant-changing-glint: oklch(0.75 0.183 55.934);
   --assistant-waiting: oklch(0.702 0.183 293.541);
   --assistant-dim: oklch(0 0 0 / 25%);
-  --assistant-edge-glow-strength: 0.55;
+  --assistant-edge-glow-strength: 0.7;
+  --assistant-edge-floor: 32%;
 }
 @media (max-width: 640px) {
   :root {
@@ -902,10 +903,10 @@ html .bn-mobile-formatting-toolbar {
   background: repeating-conic-gradient(
     from var(--assistant-edge-angle) at 50% 50%,
     var(--assistant-edge-rest) 0deg,
-    var(--assistant-edge-rest) 50deg,
-    color-mix(in oklch, var(--assistant-tone) 65%, transparent) 120deg,
-    var(--assistant-tone) 160deg,
-    var(--assistant-glint) 174deg,
+    var(--assistant-edge-rest) 40deg,
+    color-mix(in oklch, var(--assistant-tone) 55%, transparent) 115deg,
+    var(--assistant-tone) 155deg,
+    var(--assistant-glint) 173deg,
     var(--assistant-edge-rest) 180deg
   );
 }
