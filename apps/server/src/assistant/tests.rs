@@ -548,6 +548,7 @@ async fn a_write_waits_for_approval_and_runs_the_stored_arguments() {
                 interrupt_id: pending.interrupt_id.clone(),
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -604,6 +605,7 @@ async fn a_declined_write_does_not_run_and_the_model_is_told_not_to_retry() {
                 interrupt_id,
                 approved: false,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -661,6 +663,7 @@ async fn allowing_a_write_for_the_conversation_skips_later_approvals_but_not_dan
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -698,6 +701,7 @@ async fn an_unknown_approval_is_refused_and_an_expired_one_does_not_run() {
                 interrupt_id: "approve:someone-else".into(),
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -713,6 +717,7 @@ async fn an_unknown_approval_is_refused_and_an_expired_one_does_not_run() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -1608,6 +1613,7 @@ async fn an_approval_is_used_up_and_saved_before_its_write_runs() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -1776,6 +1782,7 @@ async fn an_allowed_change_with_a_link_asks_again_and_one_without_does_not_move_
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -1917,6 +1924,7 @@ async fn a_free_text_change_always_shows_its_card_even_when_allowed() {
                     interrupt_id,
                     approved: true,
                     allow_for_conversation: true,
+                    items: None,
                 },
             )
             .await;
@@ -1956,6 +1964,7 @@ async fn after_a_change_without_a_card_no_page_opens_in_that_message() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -2266,6 +2275,7 @@ async fn an_update_shows_the_current_value_read_by_the_server_next_to_the_new_on
                 interrupt_id: pending.interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;

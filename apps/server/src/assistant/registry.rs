@@ -380,6 +380,8 @@ fn mail_label(name: &str) -> Label {
 /// Ask AI's own tools, which MCP does not have.
 pub(crate) const OPEN_PAGE: &str = "open_page";
 pub(crate) const LOAD_TOOLS: &str = "load_tools";
+/// Several changes proposed together: the user approves them as one group, item by item (`engine.rs`).
+pub(crate) const PROPOSE_CHANGES: &str = "propose_changes";
 
 /// Pages `open_page` may open: the app's own areas.
 const OPEN_PAGE_PREFIXES: [&str; 10] = [
@@ -478,6 +480,34 @@ impl Registry {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "The app path, without the workspace."}},
                 "required": ["path"],
+                "additionalProperties": false,
+            }),
+        });
+        specs.push(ToolSpec {
+            name: PROPOSE_CHANGES.into(),
+            description: format!(
+                "Propose several changes at once when one request needs more than one change (for example, create five tasks, or move three tasks to another status). The user sees one approval with a card per change, can untick any of them, and approves the rest together; Orbit then runs the approved ones in this order with the same checks as single calls, stops at the first failure, and tells you what happened to each. Each change is {{tool, input}}: a change tool you could call directly now (loaded ones included) and its exact arguments, at most {} changes. Use a single tool call for a single change. Reads do not go in a batch.",
+                super::engine::MAX_BATCH
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "changes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": super::engine::MAX_BATCH,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {"type": "string", "description": "The change tool, e.g. create_task or update_task."},
+                                "input": {"type": "object", "description": "Its arguments, exactly as for a direct call."},
+                            },
+                            "required": ["tool", "input"],
+                            "additionalProperties": false,
+                        },
+                    },
+                },
+                "required": ["changes"],
                 "additionalProperties": false,
             }),
         });

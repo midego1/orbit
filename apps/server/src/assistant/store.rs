@@ -43,6 +43,12 @@ pub(crate) struct ConversationState {
     /// Tags the untrusted content of this conversation (see `prompt.rs`).
     #[serde(default)]
     pub nonce: String,
+    /// What the user can undo of the changes Ask AI made in this conversation (`undo.rs`), oldest first.
+    #[serde(default)]
+    pub undo: Vec<UndoRecord>,
+    /// Notes from Orbit for the model, sent with the next user message (the changes the user undid).
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -78,6 +84,56 @@ pub(crate) struct Pending {
     pub queue: Vec<Block>,
     /// Results already made for this model turn.
     pub results: Vec<Block>,
+    /// A batch of changes (`propose_changes`) waiting as one approval: each item with the exact arguments the server
+    /// stored when it was proposed. `None` for a single change.
+    #[serde(default)]
+    pub batch: Option<Vec<BatchItem>>,
+}
+
+/// One change of a waiting batch. Its id is made by the server; the client only names ids it approves.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct BatchItem {
+    pub id: String,
+    pub tool: String,
+    pub input: Value,
+    pub risk: Risk,
+    /// The task it is about, from the server's preview (`{key, title}`), for the summary of a change that was not made.
+    #[serde(default)]
+    pub subject: Value,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UndoState {
+    Available,
+    /// Saved before the undo's effect: an undo cut off by a crash is never run twice.
+    Undoing,
+    Undone,
+    /// The task changed after Ask AI's change (or is gone): it can no longer be undone.
+    Conflict,
+}
+
+/// A change Ask AI made that the user may undo (`undo.rs`), recorded by the server when the change ran.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct UndoRecord {
+    pub id: String,
+    /// `create_task` or `update_task`.
+    pub tool: String,
+    pub task_id: String,
+    /// The task's key (`GEN-12`) when known, for messages.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// The task's version before the change (`None` for a create).
+    #[serde(default)]
+    pub before_version: Option<u64>,
+    /// The task's version right after the change: undo runs only while the task still has it.
+    pub after_version: u64,
+    /// For an update: the previous values of the fields it changed, as `update_task` arguments.
+    #[serde(default)]
+    pub restore: Value,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub state: UndoState,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +310,26 @@ impl ConversationStore {
         .rows_affected();
         transaction.commit().await?;
         Ok(taken == 1)
+    }
+
+    /// Ends a lease without saving anything (the state stays as the last save left it).
+    pub(crate) async fn release(
+        &self,
+        conversation: &Conversation,
+        run_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        let mut transaction = self
+            .database
+            .workspace_transaction(conversation.workspace_id)
+            .await?;
+        sqlx::query(
+            "UPDATE assistant_conversations SET run_id = NULL, run_until = NULL WHERE id = $1 AND run_id = $2",
+        )
+        .bind(conversation.id.to_string())
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await
     }
 
     /// Saves the state (it slides the expiry); with `release`, also ends the run's lease. `false` when this run no

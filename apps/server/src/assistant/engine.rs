@@ -26,9 +26,10 @@ use super::model::{
     Block, Delta, Message, ModelProvider, ModelRequest, ProviderError, Role, StopReason, Usage,
 };
 use super::prompt;
-use super::registry::{self, LOAD_TOOLS, OPEN_PAGE, Registry, Risk};
+use super::registry::{self, LOAD_TOOLS, OPEN_PAGE, PROPOSE_CHANGES, Registry, Risk};
 pub(crate) use super::settings::Gate;
-use super::store::{ConversationState, Pending, TurnState};
+use super::store::{BatchItem, ConversationState, Pending, TurnState};
+use super::undo;
 
 /// Runs a tool as the signed-in user (the MCP tools in-process, `crate::mcp::TaskTools`).
 pub(crate) trait ToolRunner: Send + Sync {
@@ -93,7 +94,21 @@ pub(crate) enum Input {
         approved: bool,
         /// "Allow this action for this conversation" (write tools only).
         allow_for_conversation: bool,
+        /// For a batch: the ids of the items the user approved (server-made ids of the waiting batch).
+        items: Option<Vec<String>>,
     },
+}
+
+/// The most changes one `propose_changes` batch may hold.
+pub(crate) const MAX_BATCH: usize = 20;
+
+/// How a change runs: after its own approval card (the page follows), as part of an approved batch (no page moves;
+/// the summary links each change), or allowed for the chat without a card (no page moves for the rest of the message).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChangeMode {
+    Carded,
+    Batch,
+    Allowed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -139,6 +154,8 @@ performed.";
 const NOT_RUN: &str =
     "Not run: an earlier action in the same step waited for the user, who moved on.";
 const STOPPED: &str = "Not run: the user stopped the run.";
+const BATCH_DECLINED: &str = "The user declined this whole batch, so NONE of its changes were made. Do not try them \
+again and do not try another way to get the same result; ask the user what they want instead.";
 const UNCERTAIN: &str = "The server stopped while this approved change ran, so it may or may not have been made. Read \
 the item to check before you do anything else; do not repeat the change without asking the user.";
 const MODEL_RESULT_LIMIT: usize = 20_000;
@@ -173,9 +190,16 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 interrupt_id,
                 approved,
                 allow_for_conversation,
+                items,
             } => {
                 match self
-                    .resume(state, &interrupt_id, approved, allow_for_conversation)
+                    .resume(
+                        state,
+                        &interrupt_id,
+                        approved,
+                        allow_for_conversation,
+                        items,
+                    )
                     .await
                 {
                     Ok(ToolsOutcome::Done(results)) => {
@@ -223,6 +247,12 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 text: format!("<page-context>{context}</page-context>"),
             });
         }
+        // what the user did in the panel since (undo): Orbit's own words, built from task keys only
+        for note in std::mem::take(&mut state.notes) {
+            content.push(Block::Text {
+                text: format!("<orbit-note>{note}</orbit-note>"),
+            });
+        }
         content.push(Block::Text {
             text: text.to_owned(),
         });
@@ -239,6 +269,7 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         interrupt_id: &str,
         approved: bool,
         allow_for_conversation: bool,
+        items: Option<Vec<String>>,
     ) -> Result<ToolsOutcome, Outcome> {
         let Some(pending) = state.pending.take() else {
             self.out
@@ -258,6 +289,26 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 )
                 .await;
             return Err(Outcome::Rejected);
+        }
+        // The client only names which of the server's own items it approves; a list that does not fit the waiting
+        // approval (an id it does not have, a repeat, none at all, or items for a single change) runs nothing.
+        let selection = match (&pending.batch, approved, items) {
+            (Some(batch), true, Some(ids)) if valid_selection(batch, &ids) => Some(ids),
+            (Some(_), false, _) => None,
+            (None, _, None) => None,
+            _ => {
+                state.pending = Some(pending);
+                self.out
+                    .run_error(
+                        "That selection does not match the changes waiting for your approval; reload the conversation.",
+                        "invalid_selection",
+                    )
+                    .await;
+                return Err(Outcome::Rejected);
+            }
+        };
+        if pending.batch.is_some() {
+            return Ok(self.resume_batch(state, pending, approved, selection).await);
         }
         let Pending {
             tool_use_id,
@@ -291,21 +342,187 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             if allow_for_conversation && risk == Risk::Write && !self.free_text(&name) {
                 state.allowed_tools.insert(name.clone());
             }
-            self.run_change(state, &message_id, &tool_use_id, &name, input, &nonce, true)
-                .await
+            self.run_change(
+                state,
+                &message_id,
+                &tool_use_id,
+                &name,
+                input,
+                &nonce,
+                ChangeMode::Carded,
+            )
+            .await
         };
         results.push(self.deliver(state, &tool_use_id, result).await);
+        Ok(self.continue_turn(state, &message_id, queue, results).await)
+    }
+
+    /// After an answered approval: the rest of the model turn, in the resumed run's own message.
+    async fn continue_turn(
+        &self,
+        state: &mut ConversationState,
+        message_id: &str,
+        queue: Vec<Block>,
+        results: Vec<Block>,
+    ) -> ToolsOutcome {
         let outcome = self
-            .run_tools(state, &message_id, queue.into(), results, false)
+            .run_tools(state, message_id, queue.into(), results, false)
             .await;
         // nothing was shown in it (a decline): no empty message on reload
         if let Some(position) = state.display.iter().position(|message| {
-            message["id"] == message_id.as_str()
+            message["id"] == message_id
                 && message["toolCalls"].as_array().is_none_or(Vec::is_empty)
         }) {
             state.display.remove(position);
         }
-        Ok(outcome)
+        outcome
+    }
+
+    /// An answered batch: declined, expired, or the approved items applied in order, stopping at the first failure.
+    async fn resume_batch(
+        &self,
+        state: &mut ConversationState,
+        pending: Pending,
+        approved: bool,
+        selection: Option<Vec<String>>,
+    ) -> ToolsOutcome {
+        let Pending {
+            tool_use_id,
+            expires_at,
+            queue,
+            mut results,
+            batch,
+            ..
+        } = pending;
+        let batch = batch.unwrap_or_default();
+        let message_id = format!("msg-{}", Id::new_v7());
+        state.display.push(agui::assistant_message(&message_id));
+        let nonce = state.nonce.clone();
+        let result = if TimestampMillis::now().as_millis() > expires_at {
+            CallResult {
+                model: EXPIRED.into(),
+                is_error: false,
+                client: json!({"expired": true}).to_string(),
+            }
+        } else if !approved {
+            for item in &batch {
+                self.hooks.audit_change(&item.tool, "declined").await;
+            }
+            CallResult {
+                model: BATCH_DECLINED.into(),
+                is_error: false,
+                client: json!({"declined": true}).to_string(),
+            }
+        } else {
+            let selected = selection.unwrap_or_default();
+            self.apply_batch(state, &message_id, &tool_use_id, &batch, &selected, &nonce)
+                .await
+        };
+        results.push(self.deliver(state, &tool_use_id, result).await);
+        self.continue_turn(state, &message_id, queue, results).await
+    }
+
+    /// Applies the selected items of a batch in the batch's order, each through the normal change path (the member's
+    /// own permissions, audit, card, undo record). The first failure stops it: the rest are not run, and every item's
+    /// outcome is reported (to the model, the panel and the summary card).
+    async fn apply_batch(
+        &self,
+        state: &mut ConversationState,
+        message_id: &str,
+        tool_use_id: &str,
+        batch: &[BatchItem],
+        selected: &[String],
+        nonce: &str,
+    ) -> CallResult {
+        let mut stopped: Option<&str> = None;
+        let mut lines = vec![
+            "Orbit ran the changes of this batch that the user approved, in order, and stops at the first failure:"
+                .to_owned(),
+        ];
+        let mut items = Vec::new();
+        let (mut applied, mut failed, mut skipped) = (0, 0, 0);
+        for item in batch {
+            let label = format!("{} {}", item.id, item.tool);
+            let skip = if !selected.contains(&item.id) {
+                Some("not selected by the user")
+            } else if let Some(reason) = stopped {
+                Some(reason)
+            } else if self.cancel.is_cancelled() {
+                stopped = Some("the user stopped the run");
+                stopped
+            } else {
+                None
+            };
+            if let Some(reason) = skip {
+                skipped += 1;
+                lines.push(format!("- {label}: NOT run ({reason})."));
+                items.push(json!({"id": item.id, "tool": item.tool, "outcome": "skipped", "reason": reason}));
+                state
+                    .turn
+                    .changes
+                    .push(cards::outcome_entry(
+                    &item.tool,
+                    &item.input,
+                    &item.subject,
+                    "skipped",
+                    reason,
+                ));
+                continue;
+            }
+            // the same checks as a single change: still a change the assistant may make
+            let result = if matches!(
+                self.registry.risk(&item.tool),
+                Some(Risk::Write | Risk::Dangerous)
+            ) {
+                self.run_change(
+                    state,
+                    message_id,
+                    tool_use_id,
+                    &item.tool,
+                    item.input.clone(),
+                    nonce,
+                    ChangeMode::Batch,
+                )
+                .await
+            } else {
+                CallResult::error(format!("{} is not available to you.", item.tool))
+            };
+            if result.is_error {
+                failed += 1;
+                stopped = Some("an earlier change of the batch failed");
+                let error = error_text(&result.client);
+                lines.push(format!("- {label}: FAILED. {}", result.model));
+                items.push(json!({"id": item.id, "tool": item.tool, "outcome": "failed", "error": error}));
+                state
+                    .turn
+                    .changes
+                    .push(cards::outcome_entry(
+                    &item.tool,
+                    &item.input,
+                    &item.subject,
+                    "failed",
+                    &error,
+                ));
+            } else {
+                applied += 1;
+                lines.push(format!("- {label}: applied. {}", result.model));
+                items.push(json!({"id": item.id, "tool": item.tool, "outcome": "applied"}));
+            }
+        }
+        if failed > 0 {
+            lines.push(
+                "Tell the user which changes were made and which were not; do not retry without asking.".into(),
+            );
+        }
+        if skipped > 0 {
+            lines.push("Do not make the changes the user did not select.".into());
+        }
+        CallResult {
+            model: lines.join("\n"),
+            is_error: false,
+            client: json!({"batch": {"items": items, "applied": applied, "failed": failed, "skipped": skipped}})
+                .to_string(),
+        }
     }
 
     async fn model_loop(&self, state: &mut ConversationState, deadline: Instant) -> Outcome {
@@ -586,6 +803,17 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 CallResult::error(
                     "Not run: your answer was cut off (max_tokens) before this tool call was complete. Call it again with shorter input.",
                 )
+            } else if name == PROPOSE_CHANGES
+                && let Some(input) = input
+            {
+                match self.propose(state, &input).await {
+                    Ok((items, risk)) => {
+                        self.pause_batch(state, message_id, id, input, items, risk, queue, results)
+                            .await;
+                        return ToolsOutcome::Paused;
+                    }
+                    Err(message) => CallResult::error(message),
+                }
             } else if let Some(input) = input {
                 match self.registry.risk(&name) {
                     None => CallResult::error(format!(
@@ -600,8 +828,16 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                             && !self.free_text(&name)
                             && !plants_outside_content(&input) =>
                     {
-                        self.run_change(state, message_id, &id, &name, input, &nonce, false)
-                            .await
+                        self.run_change(
+                            state,
+                            message_id,
+                            &id,
+                            &name,
+                            input,
+                            &nonce,
+                            ChangeMode::Allowed,
+                        )
+                        .await
                     }
                     Some(risk) => {
                         self.pause(state, message_id, id, name, input, risk, queue, results)
@@ -657,6 +893,150 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             interrupt: interrupt.clone(),
             queue: queue.into(),
             results,
+            batch: None,
+        });
+        self.hooks.checkpoint(state).await;
+        self.out
+            .run_finished(
+                self.thread_id,
+                self.run_id,
+                Some(json!({"type": "interrupt", "interrupts": [interrupt]})),
+            )
+            .await;
+    }
+
+    /// Checks a `propose_changes` batch before the user sees it, all or nothing: every item a change tool the model
+    /// may call now, with an object input. Returns the items with server-made ids and the highest risk.
+    async fn propose(
+        &self,
+        state: &ConversationState,
+        input: &Value,
+    ) -> Result<(Vec<BatchItem>, Risk), String> {
+        let Some(changes) = input["changes"].as_array() else {
+            return Err("Not run: propose_changes needs `changes`, a list of {tool, input}.".into());
+        };
+        if changes.is_empty() || changes.len() > MAX_BATCH {
+            return Err(format!(
+                "Not run: a batch holds 1 to {MAX_BATCH} changes; this one has {}.",
+                changes.len()
+            ));
+        }
+        let mut items = Vec::new();
+        let mut risk = Risk::Write;
+        let mut problems = Vec::new();
+        for (index, change) in changes.iter().enumerate() {
+            let number = index + 1;
+            let tool = change["tool"].as_str().unwrap_or_default();
+            let available = self.registry.get(tool).is_some_and(|def| {
+                def.label.exposure == registry::Exposure::Core
+                    || state.loaded_tools.contains(tool)
+            });
+            match (self.registry.risk(tool), &change["input"]) {
+                (Some(item_risk @ (Risk::Write | Risk::Dangerous)), Value::Object(_)) if available => {
+                    if item_risk == Risk::Dangerous {
+                        risk = Risk::Dangerous;
+                    }
+                    items.push(BatchItem {
+                        id: format!("c{number}"),
+                        tool: tool.to_owned(),
+                        input: change["input"].clone(),
+                        risk: item_risk,
+                        subject: Value::Null,
+                    });
+                }
+                (Some(Risk::Write | Risk::Dangerous), Value::Object(_)) => problems.push(format!(
+                    "change {number}: load {tool} with load_tools first"
+                )),
+                (Some(Risk::Write | Risk::Dangerous), _) => {
+                    problems.push(format!("change {number}: `input` must be an object"));
+                }
+                (Some(Risk::Read), _) => problems.push(format!(
+                    "change {number}: {tool} is a read; call it directly, not in a batch"
+                )),
+                (None, _) => problems.push(format!(
+                    "change {number}: there is no change tool named {tool:?} available to you"
+                )),
+            }
+        }
+        if !problems.is_empty() {
+            return Err(format!(
+                "Not run, and not shown to the user: {}. Fix the batch and propose it again.",
+                problems.join("; ")
+            ));
+        }
+        Ok((items, risk))
+    }
+
+    /// Pauses the run on a batch: one approval with a card per change (its preview read by the server now), every
+    /// item's exact arguments stored with it.
+    #[allow(clippy::too_many_arguments)]
+    async fn pause_batch(
+        &self,
+        state: &mut ConversationState,
+        message_id: &str,
+        id: String,
+        input: Value,
+        mut items: Vec<BatchItem>,
+        risk: Risk,
+        queue: VecDeque<Block>,
+        results: Vec<Block>,
+    ) {
+        let expires_at = TimestampMillis::now().as_millis() + self.limits.approval_ttl_ms;
+        let interrupt_id = format!("approve:{id}");
+        let mut shown = Vec::new();
+        for item in &mut items {
+            let mut entry = json!({
+                "id": item.id,
+                "tool": item.tool,
+                "risk": item.risk,
+                "args": item.input,
+                "freeText": self.free_text(&item.tool),
+            });
+            if let Some(preview) = cards::approval_preview(
+                &self.names,
+                self.tools,
+                &item.tool,
+                &item.input,
+                self.workspace_id,
+            )
+            .await
+            {
+                item.subject = json!({"key": preview["task"]["key"], "title": preview["task"]["title"]});
+                entry["preview"] = preview;
+            }
+            shown.push(entry);
+        }
+        // a batch is never "allowed for this chat": every item waits for this approval
+        let metadata = json!({
+            "tool": PROPOSE_CHANGES,
+            "risk": risk,
+            "allowForConversation": false,
+            "batch": {"items": shown},
+        });
+        let count = items.len();
+        let interrupt = agui::approval_interrupt(
+            &interrupt_id,
+            &id,
+            &if count == 1 {
+                "Make 1 change?".to_owned()
+            } else {
+                format!("Make {count} changes?")
+            },
+            &iso_time(expires_at),
+            metadata,
+        );
+        state.pending = Some(Pending {
+            interrupt_id,
+            tool_use_id: id,
+            name: PROPOSE_CHANGES.to_owned(),
+            input,
+            risk,
+            expires_at,
+            message_id: message_id.to_owned(),
+            interrupt: interrupt.clone(),
+            queue: queue.into(),
+            results,
+            batch: Some(items),
         });
         self.hooks.checkpoint(state).await;
         self.out
@@ -779,8 +1159,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         name: &str,
         input: Value,
         nonce: &str,
-        carded: bool,
+        mode: ChangeMode,
     ) -> CallResult {
+        let carded = mode != ChangeMode::Allowed;
         // Saved before the effect: the approval is used up, and if the server stops during the write the model is
         // told it may or may not have happened (never "approve it again").
         state.applying = Some(id.to_owned());
@@ -790,6 +1171,15 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 "Not run: the conversation could not be saved, so the change was not made. Try again.",
             );
         }
+        // what an undo would set back: the task as it is right before the update, read by the server
+        let before = if name == "update_task" {
+            self.tools
+                .lookup("get_task", json!({"task_id": input["task_id"]}))
+                .await
+                .ok()
+        } else {
+            None
+        };
         let outcome = self.tools.call(name, input.clone()).await;
         state.applying = None;
         if !carded {
@@ -811,15 +1201,24 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                     .and_then(|label| {
                         registry::page_url(label.page, &input, &value, self.workspace_id)
                     });
-                state.turn.changes.push(cards::change_entry(
-                    name,
-                    &input,
-                    &value,
-                    card.as_ref(),
-                    url.clone(),
-                ));
+                let key = card.as_ref().and_then(|card| card["key"].as_str());
+                let now = TimestampMillis::now().as_millis();
+                let record = match name {
+                    "create_task" => undo::record_create(&value, key, now),
+                    "update_task" => before
+                        .as_ref()
+                        .and_then(|before| undo::record_update(&input, before, &value, key, now)),
+                    _ => None,
+                };
+                let mut entry =
+                    cards::change_entry(name, &input, &value, card.as_ref(), url.clone());
+                if let Some(record) = record {
+                    entry["undo"] = json!({"id": record.id, "state": "available"});
+                    undo::remember(state, record);
+                }
+                state.turn.changes.push(entry);
                 let mut result = success(nonce, name, &value);
-                if carded && let Some(url) = url {
+                if mode == ChangeMode::Carded && let Some(url) = url {
                     let note = self.navigate(state, message_id, &url).await;
                     result = with_note(result, &note);
                 }
@@ -1115,4 +1514,33 @@ pub(crate) fn provider_error_text(error: &ProviderError, model: &str) -> String 
         ProviderError::Protocol(_) => "Anthropic's answer could not be read. Try again.".into(),
         ProviderError::Cancelled => "Stopped.".into(),
     }
+}
+
+/// Whether the ids a client approved fit the waiting batch: at least one, no repeats, every one an item of it.
+fn valid_selection(batch: &[BatchItem], ids: &[String]) -> bool {
+    !ids.is_empty()
+        && ids.len() <= batch.len()
+        && ids.iter().enumerate().all(|(at, id)| {
+            batch.iter().any(|item| item.id == *id) && !ids[..at].contains(id)
+        })
+}
+
+/// The error text of a failed call as the panel got it (`{"error": …}`), without the untrusted-data wrapper, cut for
+/// the summary (where it is plain text).
+fn error_text(client: &str) -> String {
+    let raw = serde_json::from_str::<Value>(client)
+        .ok()
+        .and_then(|value| value["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "The change failed.".to_owned());
+    let inner = match (raw.find('\n'), raw.rfind("\n</untrusted-data")) {
+        (Some(start), Some(end)) if raw.starts_with("<untrusted-data") && start < end => {
+            raw[start + 1..end].to_owned()
+        }
+        _ => raw,
+    };
+    inner
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(300)
+        .collect()
 }
