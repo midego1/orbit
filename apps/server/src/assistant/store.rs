@@ -884,6 +884,21 @@ impl ConversationStore {
         release: bool,
         now: TimestampMillis,
     ) -> Result<bool, sqlx::Error> {
+        self.save_auditing(conversation, state, run_id, release, &[], now)
+            .await
+    }
+
+    /// [`Self::save`], with an `assistant.change` row (declined) for each of `dropped` written in the same
+    /// transaction, only when the state is saved: a retired approval is audited exactly once.
+    pub(crate) async fn save_auditing(
+        &self,
+        conversation: &Conversation,
+        state: &ConversationState,
+        run_id: &str,
+        release: bool,
+        dropped: &[String],
+        now: TimestampMillis,
+    ) -> Result<bool, sqlx::Error> {
         let json =
             serde_json::to_string(state).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
         let title = first_message_title(state);
@@ -909,6 +924,9 @@ impl ConversationStore {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
+        if saved == 1 {
+            audit_dropped(&mut transaction, conversation, dropped, now).await?;
+        }
         transaction.commit().await?;
         Ok(saved == 1)
     }

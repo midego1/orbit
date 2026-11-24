@@ -317,7 +317,8 @@ enum TrashCheck {
     Restored,
     /// Sub-issues went with it, and the restore failed.
     RestoreFailed,
-    /// The trash could not be read, or the task was not found in it.
+    /// The trash could not be read, or the task was not found in it (only its first 3 pages of 100, newest first,
+    /// are searched: a task trashed a moment ago is on the first one, so "not found" means something else happened).
     Unknown,
 }
 

@@ -1255,26 +1255,7 @@ async fn run(
     if conversation.state.nonce.is_empty() {
         conversation.state.nonce = prompt::new_nonce();
     }
-    // A chat left alone longer than the panel keeps it open (a tab left open) starts afresh, as a
-    // continued one does: what waited for approval expires and "Allow in this chat" ends.
-    if now.as_millis() - conversation.updated_at > store::IDLE_MS {
-        let dropped = engine::pending_changes(&conversation.state);
-        engine::retire(&mut conversation.state);
-        if !dropped.is_empty() {
-            let audited = async {
-                let mut transaction = state
-                    .database
-                    .workspace_transaction(conversation.workspace_id)
-                    .await?;
-                store::audit_dropped(&mut transaction, &conversation, &dropped, now).await?;
-                transaction.commit().await
-            }
-            .await;
-            if let Err(error) = audited {
-                tracing::warn!(%error, "assistant audit rows could not be written");
-            }
-        }
-    }
+    retire_idle(&state, &mut conversation, &run_id, now).await;
     let workspace_name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
         .bind(member.workspace_id.to_string())
         .fetch_optional(state.database.pool())
@@ -1402,6 +1383,39 @@ async fn run(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// A chat left alone longer than the panel keeps it open (a tab left open) starts afresh, as a continued one does:
+/// what waited for approval expires and "Allow in this chat" ends. The retired state is saved at once (the run holds
+/// the lease), with a declined audit row per dropped change in the same transaction, so a run cut off after this
+/// point finds the chat retired and audits nothing again.
+pub(crate) async fn retire_idle(
+    state: &AssistantState,
+    conversation: &mut Conversation,
+    run_id: &str,
+    now: TimestampMillis,
+) {
+    if now.as_millis() - conversation.updated_at <= store::IDLE_MS {
+        return;
+    }
+    let dropped = engine::pending_changes(&conversation.state);
+    if !engine::retire(&mut conversation.state) {
+        return;
+    }
+    if let Err(error) = state
+        .store
+        .save_auditing(
+            conversation,
+            &conversation.state,
+            run_id,
+            false,
+            &dropped,
+            now,
+        )
+        .await
+    {
+        tracing::warn!(%error, "assistant conversation could not be saved after retiring it");
+    }
 }
 
 /// The signed-in member as a tool principal: their own access, every project they can see.

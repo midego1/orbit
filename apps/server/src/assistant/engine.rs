@@ -1477,11 +1477,6 @@ pub(crate) fn client_view(value: &Value) -> String {
     Value::Object(compact).to_string()
 }
 
-/// Closes a conversation the member switches away from (New chat, or continuing another one): the
-/// approval that waits expires for good (its call and the calls queued after it are answered as not
-/// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
-/// chat" is withdrawn, so continuing the conversation later asks again for each change. `true` when
-/// the state changed.
 /// The changes a waiting approval holds (each item of a batch, or the single change): what retiring the chat drops
 /// unanswered, audited as declined.
 pub(crate) fn pending_changes(state: &ConversationState) -> Vec<String> {
@@ -1494,6 +1489,11 @@ pub(crate) fn pending_changes(state: &ConversationState) -> Vec<String> {
     }
 }
 
+/// Closes a conversation the member switches away from (New chat, or continuing another one): the
+/// approval that waits expires for good (its call and the calls queued after it are answered as not
+/// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
+/// chat" is withdrawn, so continuing the conversation later asks again for each change. `true` when
+/// the state changed.
 pub(crate) fn retire(state: &mut ConversationState) -> bool {
     let mut changed = !state.allowed_tools.is_empty();
     state.allowed_tools.clear();

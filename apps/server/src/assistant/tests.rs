@@ -5968,3 +5968,144 @@ async fn retiring_a_chat_audits_each_dropped_change_as_declined() {
     one.run(&mut single, ask("x")).await;
     assert_eq!(super::engine::pending_changes(&single), ["create_task"]);
 }
+
+async fn declined_rows(database: &orbit_platform::Database, conversation: Id) -> usize {
+    sqlx::query_scalar::<_, String>(
+        "SELECT metadata_json FROM audit_events WHERE action = 'assistant.change' AND resource_id = $1",
+    )
+    .bind(conversation.to_string())
+    .fetch_all(database.pool())
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|row| row.contains("chat_retired"))
+    .count()
+}
+
+/// A conversation of the owner whose run left a batch of `n` changes waiting, saved as of `at`.
+async fn waiting_chat(
+    store: &ConversationStore,
+    w: &Workspace,
+    n: usize,
+    at: TimestampMillis,
+) -> super::store::Conversation {
+    let conversation = store
+        .create(w.workspace, w.owner, "n0nce".into(), at)
+        .await
+        .unwrap()
+        .unwrap();
+    let titles: Vec<String> = (1..=n).map(|i| format!("T{i}")).collect();
+    let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+    let harness = Harness::new(vec![tool("toolu_b", "propose_changes", &creates(&titles))]).await;
+    let mut state = conversation.state.clone();
+    assert_eq!(harness.run(&mut state, ask("go")).await.0, Outcome::Paused);
+    assert!(
+        store
+            .lease(&conversation, "run-0", at.as_millis() + 60_000, at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .save(&conversation, &state, "run-0", true, at)
+            .await
+            .unwrap()
+    );
+    store
+        .get(conversation.id, w.workspace, w.owner, at)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_idle_chat_audits_its_dropped_changes_once_even_when_the_run_is_cut_off() {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let assistant = super::AssistantState::new(
+        Arc::new(IdentityRepository::new(database.clone())),
+        CookieMode::secure(),
+        TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        None,
+        orbit_platform::EnvironmentMode::Unspecified,
+    );
+    let now = TimestampMillis::now();
+    // left alone longer than the panel keeps a chat open
+    let then = TimestampMillis::from_millis(now.as_millis() - super::store::IDLE_MS - 60_000);
+    let chat = waiting_chat(&assistant.store, &w, 2, then).await;
+    // a run takes the chat and retires it ...
+    let mut taken = chat.clone();
+    assert!(
+        assistant
+            .store
+            .lease(&taken, "run-1", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    super::retire_idle(&assistant, &mut taken, "run-1", now).await;
+    assert!(taken.state.pending.is_none());
+    assert_eq!(declined_rows(&database, chat.id).await, 2);
+    // ... and is cut off before it ends: its lease runs out and the next run reads the chat again
+    assistant.store.release(&taken, "run-1").await.unwrap();
+    let mut again = assistant
+        .store
+        .get_active(chat.id, w.workspace, w.owner, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(again.state.pending.is_none(), "the retired state was saved");
+    assert!(
+        assistant
+            .store
+            .lease(&again, "run-2", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    super::retire_idle(&assistant, &mut again, "run-2", now).await;
+    assert_eq!(declined_rows(&database, chat.id).await, 2, "audited once");
+}
+
+#[tokio::test]
+async fn continuing_an_earlier_chat_audits_each_dropped_approval_once() {
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let store = ConversationStore::new(database.clone());
+    let now = TimestampMillis::now();
+    // A waits on three changes; a new chat B retires it
+    let a = waiting_chat(&store, &w, 3, now).await;
+    let b = waiting_chat(&store, &w, 1, TimestampMillis::now()).await;
+    assert_eq!(declined_rows(&database, a.id).await, 3);
+    assert_eq!(
+        declined_rows(&database, b.id).await,
+        0,
+        "the active chat is not retired"
+    );
+    // continuing A retires B (its single change) and does not audit A's again
+    assert!(matches!(
+        store
+            .resume(a.id, w.workspace, w.owner, TimestampMillis::now())
+            .await
+            .unwrap(),
+        super::store::Switch::Done(_)
+    ));
+    assert_eq!(declined_rows(&database, a.id).await, 3);
+    assert_eq!(declined_rows(&database, b.id).await, 1);
+    // and back to B: nothing waits any more, nothing more is audited
+    assert!(matches!(
+        store
+            .resume(b.id, w.workspace, w.owner, TimestampMillis::now())
+            .await
+            .unwrap(),
+        super::store::Switch::Done(_)
+    ));
+    assert_eq!(declined_rows(&database, a.id).await, 3);
+    assert_eq!(declined_rows(&database, b.id).await, 1);
+}
