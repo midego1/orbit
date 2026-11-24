@@ -37,7 +37,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures_util::future::BoxFuture;
 use orbit_platform::{Database, EnvironmentMode, Id, TimestampMillis};
@@ -220,6 +220,10 @@ pub(crate) fn router(state: AssistantState) -> Router {
             &format!("{base}/conversations/{{conversation_id}}/stop"),
             post(stop),
         )
+        .route(
+            &format!("{base}/conversations/{{conversation_id}}/model"),
+            put(set_chat_model),
+        )
         .route(&format!("{base}/run"), post(run))
         .route(
             &format!("{base}/settings"),
@@ -317,8 +321,12 @@ fn setup_word(key: &KeyState) -> &'static str {
     }
 }
 
-/// The AG-UI messages of a conversation, with the approval card that waits, if any.
-fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value {
+/// The AG-UI messages of a conversation, with the approval card that waits, if any, and the model its next run uses.
+fn conversation_view(
+    conversation: &Conversation,
+    settings: Option<&AiSettings>,
+    now: TimestampMillis,
+) -> Value {
     let mut messages = conversation.state.display.clone();
     if let Some(pending) = &conversation.state.pending
         && let Some(message) = messages
@@ -333,6 +341,7 @@ fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value
         "messages": messages,
         "expiresAt": conversation.expires_at,
         "busy": conversation.busy_until.is_some_and(|until| until > now.as_millis()),
+        "model": settings::run_model(settings, conversation.model.as_deref()).0,
     })
 }
 
@@ -367,10 +376,11 @@ async fn current_conversation(
     };
     let key = resolve_key(&state, member.workspace_id, settings.as_ref());
     Json(json!({
-        "conversation": conversation.as_ref().map(|conversation| conversation_view(conversation, now)),
+        "conversation": conversation.as_ref().map(|conversation| conversation_view(conversation, settings.as_ref(), now)),
         "setup": setup_word(&key),
         "canManage": can_manage,
-        "model": settings.map_or_else(|| DEFAULT_MODEL.to_owned(), |settings| settings.model),
+        "model": settings.as_ref().map_or(DEFAULT_MODEL, |settings| settings.model.as_str()),
+        "models": settings::chat_models(settings.as_ref()),
     }))
     .into_response()
 }
@@ -396,7 +406,11 @@ async fn new_conversation(
         .await
     {
         Ok(Some(conversation)) => {
-            Json(json!({"conversation": conversation_view(&conversation, now)})).into_response()
+            let Ok(settings) = state.settings.get(member.workspace_id).await else {
+                return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.");
+            };
+            Json(json!({"conversation": conversation_view(&conversation, settings.as_ref(), now)}))
+                .into_response()
         }
         Ok(None) => problem(
             StatusCode::CONFLICT,
@@ -407,6 +421,71 @@ async fn new_conversation(
             tracing::warn!(%error, "assistant conversation could not be created");
             problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatModelBody {
+    /// `None`: the workspace's model.
+    model: Option<String>,
+}
+
+/// Picks the model of the member's own chat: only one of the workspace's allowed models (the server never takes a
+/// model name it did not offer). Each run checks the pick again, as an admin can take it off the list later.
+async fn set_chat_model(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<ChatModelBody>,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Ok(conversation_id) = conversation.parse::<Id>() else {
+        return problem(StatusCode::NOT_FOUND, "not_found", "No such conversation.");
+    };
+    let settings = match state.settings.get(member.workspace_id).await {
+        Ok(settings) => settings,
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
+    };
+    let allowed = settings::chat_models(settings.as_ref());
+    let picked = match body.model.as_deref() {
+        // the workspace's own model is stored as no pick, so it follows a later change of that model
+        Some(model) if model == allowed[0] => None,
+        Some(model) if allowed.iter().any(|allowed| allowed == model) => Some(model),
+        None => None,
+        Some(_) => {
+            return problem(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "model_not_allowed",
+                "This workspace does not allow that model for chats.",
+            );
+        }
+    };
+    let now = TimestampMillis::now();
+    match state
+        .store
+        .set_model(
+            conversation_id,
+            member.workspace_id,
+            member.user_id,
+            picked,
+            now,
+        )
+        .await
+    {
+        Ok(true) => Json(json!({
+            "model": picked.unwrap_or(allowed[0].as_str()),
+            "models": allowed,
+        }))
+        .into_response(),
+        Ok(false) => problem(
+            StatusCode::NOT_FOUND,
+            "conversation_gone",
+            "This conversation has ended. Start a new chat.",
+        ),
+        Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
     }
 }
 
@@ -595,10 +674,7 @@ async fn run(
         Ok(settings) => settings,
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
     };
-    let model = settings.as_ref().map_or_else(
-        || DEFAULT_MODEL.to_owned(),
-        |settings| settings.model.clone(),
-    );
+    let (model, dropped) = settings::run_model(settings.as_ref(), conversation.model.as_deref());
     let api_key = match resolve_key(&state, member.workspace_id, settings.as_ref()) {
         KeyState::Ready(key) => key,
         KeyState::NoKey => {
@@ -740,9 +816,22 @@ async fn run(
         Input::Message { text, .. } => mentions::requested(&input.context, text),
         Input::Resume { .. } => Vec::new(),
     };
+    // an admin took the chat's model off the list: the chat goes back to the workspace's model, and says so once
+    let mut emitter = Emitter::new(sender);
+    if let Some(dropped) = dropped
+        && state
+            .store
+            .clear_model(&conversation, &dropped)
+            .await
+            .unwrap_or(false)
+    {
+        emitter = emitter.with_notice(
+            "orbit.model_fallback",
+            json!({"model": model, "previous": dropped}),
+        );
+    }
     let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, api_key);
     tokio::spawn(async move {
-        let emitter = Emitter::new(sender);
         let tools = SessionTools {
             tools: state.tools.clone(),
             principal,
@@ -1026,6 +1115,9 @@ impl RunHooks for DbHooks {
 #[serde(rename_all = "camelCase")]
 struct SettingsBody {
     model: String,
+    /// The other models members may pick per chat (`None`: unchanged).
+    #[serde(default)]
+    allowed_models: Option<Vec<String>>,
     #[serde(default)]
     api_key: Option<String>,
     /// Tokens per UTC day for the whole workspace (cache reads count a tenth).
@@ -1152,6 +1244,7 @@ async fn settings_view(state: &AssistantState, workspace_id: Id) -> Result<Value
         "provider": settings::PROVIDER_ANTHROPIC,
         "model": settings.as_ref().map_or(DEFAULT_MODEL, |settings| settings.model.as_str()),
         "models": OFFERED_MODELS,
+        "allowedModels": settings::chat_models(settings.as_ref()),
         "key": {
             "set": own.is_some() || state.server_key.is_some(),
             "last4": own.map(|key| key.last4.clone()),
@@ -1229,6 +1322,7 @@ async fn save_settings(
             &body.model,
             key,
             body.daily_token_cap,
+            body.allowed_models.as_deref(),
             TimestampMillis::now(),
         )
         .await
@@ -1263,6 +1357,7 @@ async fn remove_key(
             member.user_id,
             &model,
             Some(None),
+            None,
             None,
             TimestampMillis::now(),
         )

@@ -91,6 +91,9 @@ pub(crate) struct Conversation {
     pub expires_at: i64,
     /// A run holds the conversation until this time.
     pub busy_until: Option<i64>,
+    /// The model the member picked for this chat (`None`: the workspace's model). Each run checks it against the
+    /// workspace's allowed models again.
+    pub model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -113,10 +116,11 @@ fn from_row(row: &sqlx::any::AnyRow) -> Result<Conversation, sqlx::Error> {
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
         expires_at: row.try_get("expires_at")?,
         busy_until: row.try_get("run_until")?,
+        model: row.try_get("model")?,
     })
 }
 
-const COLUMNS: &str = "id, workspace_id, user_id, state_json, expires_at, run_until";
+const COLUMNS: &str = "id, workspace_id, user_id, state_json, expires_at, run_until, model";
 
 impl ConversationStore {
     pub(crate) const fn new(database: Database) -> Self {
@@ -226,6 +230,7 @@ impl ConversationStore {
             state,
             expires_at,
             busy_until: None,
+            model: None,
         }))
     }
 
@@ -289,5 +294,56 @@ impl ConversationStore {
         .rows_affected();
         transaction.commit().await?;
         Ok(saved == 1)
+    }
+
+    /// Sets the chat's model (`None`: the workspace's model), only on the user's own live conversation; `false` when
+    /// there is none. The caller checks the model against the workspace's allowed models first. A separate column, so
+    /// a run that saves its state at the end does not undo it.
+    pub(crate) async fn set_model(
+        &self,
+        id: Id,
+        workspace_id: Id,
+        user_id: Id,
+        model: Option<&str>,
+        now: TimestampMillis,
+    ) -> Result<bool, sqlx::Error> {
+        let mut transaction = self.database.workspace_transaction(workspace_id).await?;
+        let changed = sqlx::query(
+            "UPDATE assistant_conversations SET model = $1 WHERE id = $2 AND workspace_id = $3 AND user_id = $4 \
+             AND expires_at > $5",
+        )
+        .bind(model.map(str::to_owned))
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(user_id.to_string())
+        .bind(now.as_millis())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        transaction.commit().await?;
+        Ok(changed == 1)
+    }
+
+    /// Clears the chat's model when it is still `model` (an admin took it off the allowed list); `true` when this
+    /// call cleared it, so the user is told once.
+    pub(crate) async fn clear_model(
+        &self,
+        conversation: &Conversation,
+        model: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut transaction = self
+            .database
+            .workspace_transaction(conversation.workspace_id)
+            .await?;
+        let cleared = sqlx::query(
+            "UPDATE assistant_conversations SET model = NULL WHERE id = $1 AND model = $2",
+        )
+        .bind(conversation.id.to_string())
+        .bind(model)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        transaction.commit().await?;
+        Ok(cleared == 1)
     }
 }

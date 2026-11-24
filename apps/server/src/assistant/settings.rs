@@ -30,6 +30,51 @@ pub(crate) struct AiSettings {
     pub key: Option<SealedKey>,
     /// `None`: [`DEFAULT_DAILY_TOKEN_CAP`].
     pub daily_token_cap: Option<i64>,
+    /// The other models members may pick per chat (offered models only; the workspace's model is always allowed).
+    pub allowed_models: Vec<String>,
+}
+
+/// The models a chat may use in a workspace: its model first, then the others an admin allowed (offered models only,
+/// in the offered order).
+pub(crate) fn chat_models(settings: Option<&AiSettings>) -> Vec<String> {
+    let default = settings.map_or(DEFAULT_MODEL, |settings| settings.model.as_str());
+    let mut models = vec![default.to_owned()];
+    for offered in OFFERED_MODELS {
+        if offered != default
+            && settings.is_some_and(|settings| {
+                settings.allowed_models.iter().any(|model| model == offered)
+            })
+        {
+            models.push(offered.to_owned());
+        }
+    }
+    models
+}
+
+/// The model a run uses: the chat's pick while it is allowed, else the workspace's model. The second value is the
+/// pick that is no longer allowed, if any.
+pub(crate) fn run_model(
+    settings: Option<&AiSettings>,
+    picked: Option<&str>,
+) -> (String, Option<String>) {
+    let allowed = chat_models(settings);
+    match picked {
+        Some(picked) if allowed.iter().any(|model| model == picked) => (picked.to_owned(), None),
+        Some(picked) => (allowed[0].clone(), Some(picked.to_owned())),
+        None => (allowed[0].clone(), None),
+    }
+}
+
+/// The stored list: offered models only, each once (anything else in the column is ignored).
+fn parse_allowed(raw: Option<&str>) -> Vec<String> {
+    let parsed: Vec<String> = raw
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    OFFERED_MODELS
+        .iter()
+        .filter(|offered| parsed.iter().any(|model| model == *offered))
+        .map(|offered| (*offered).to_owned())
+        .collect()
 }
 
 /// The tokens a workspace may use per UTC day unless an admin sets another limit (cache reads count a tenth).
@@ -180,7 +225,8 @@ impl SettingsRepository {
     /// The settings a run uses (any member may run Ask AI; the key stays sealed).
     pub(crate) async fn get(&self, workspace_id: Id) -> Result<Option<AiSettings>, SettingsError> {
         let row = sqlx::query(
-            "SELECT provider, model, api_key_sealed, api_key_last4, daily_token_cap FROM workspace_ai_settings \
+            "SELECT provider, model, api_key_sealed, api_key_last4, daily_token_cap, allowed_models \
+             FROM workspace_ai_settings \
              WHERE workspace_id = $1",
         )
         .bind(workspace_id.to_string())
@@ -198,10 +244,16 @@ impl SettingsRepository {
                 .zip(last4)
                 .map(|(sealed, last4)| SealedKey { sealed, last4 }),
             daily_token_cap: row.try_get("daily_token_cap")?,
+            allowed_models: parse_allowed(
+                row.try_get::<Option<String>, _>("allowed_models")?
+                    .as_deref(),
+            ),
         }))
     }
 
-    /// Saves the model and, when `key` is `Some`, replaces the key (`Some(None)` removes it).
+    /// Saves the model and, when `key` is `Some`, replaces the key (`Some(None)` removes it). `allowed_models`
+    /// (when `Some`) replaces the models members may pick per chat.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn save(
         &self,
         workspace_id: Id,
@@ -209,9 +261,18 @@ impl SettingsRepository {
         model: &str,
         key: Option<Option<SealedKey>>,
         daily_token_cap: Option<i64>,
+        allowed_models: Option<&[String]>,
         now: TimestampMillis,
     ) -> Result<(), SettingsError> {
         if !OFFERED_MODELS.contains(&model) {
+            return Err(SettingsError::UnknownModel);
+        }
+        if allowed_models.is_some_and(|models| {
+            models.len() > OFFERED_MODELS.len()
+                || models
+                    .iter()
+                    .any(|model| !OFFERED_MODELS.contains(&model.as_str()))
+        }) {
             return Err(SettingsError::UnknownModel);
         }
         if daily_token_cap.is_some_and(|cap| !(1..=MAX_DAILY_TOKEN_CAP).contains(&cap)) {
@@ -279,6 +340,20 @@ impl SettingsRepository {
             .execute(&mut *transaction)
             .await?;
             metadata["daily_token_cap"] = serde_json::json!(cap);
+        }
+        if let Some(models) = allowed_models {
+            let models: Vec<String> = parse_allowed(Some(&serde_json::json!(models).to_string()))
+                .into_iter()
+                .filter(|allowed| allowed != model)
+                .collect();
+            sqlx::query(
+                "UPDATE workspace_ai_settings SET allowed_models = $1 WHERE workspace_id = $2",
+            )
+            .bind((!models.is_empty()).then(|| serde_json::json!(models).to_string()))
+            .bind(&workspace)
+            .execute(&mut *transaction)
+            .await?;
+            metadata["allowed_models"] = serde_json::json!(models);
         }
         audit::record(
             &mut transaction,
