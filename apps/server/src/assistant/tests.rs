@@ -434,6 +434,7 @@ fn ask(text: &str) -> Input {
     Input::Message {
         text: text.into(),
         page: Some("/tasks/abc".into()),
+        mentions: Vec::new(),
     }
 }
 
@@ -1428,6 +1429,232 @@ async fn the_assistants_writes_are_audited_as_the_member_via_the_assistant() {
             .call("get_task", json!({"task_id": "NOPE-1"}))
             .await
             .is_err()
+    );
+}
+
+async fn session_tools(
+    database: &orbit_platform::Database,
+    workspace: Id,
+    user: Id,
+) -> super::SessionTools {
+    use crate::mcp::TaskTools;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let principal = super::principal(database, workspace, Id::new_v7(), user)
+        .await
+        .unwrap();
+    super::SessionTools {
+        tools: TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        principal,
+    }
+}
+
+#[tokio::test]
+async fn mentions_are_read_again_with_the_members_own_access() {
+    use super::mentions::{self, Kind};
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let owner = session_tools(&database, w.workspace, w.owner).await;
+    let statuses = owner
+        .call(
+            "list_task_statuses",
+            json!({"project_id": w.project.to_string()}),
+        )
+        .await
+        .unwrap();
+    let status = statuses["items"][0]["id"].as_str().unwrap().to_owned();
+    let task = owner
+        .call(
+            "create_task",
+            json!({"project_id": w.project.to_string(), "status_id": status, "title": "Fix <b>login</b>"}),
+        )
+        .await
+        .unwrap();
+    let task_id = task["id"].as_str().unwrap().to_owned();
+    let identifier = task["identifier"].as_str().unwrap().to_owned();
+    let context = vec![json!({"description": "mentions", "value": json!([
+        {"kind": "task", "id": task_id, "token": identifier},
+        {"kind": "project", "id": w.project.to_string(), "token": "General"},
+        {"kind": "person", "id": w.owner.to_string(), "token": "Owner"},
+        {"kind": "doc", "id": Id::new_v7().to_string(), "token": "Gone"},
+        // an identifier in place of an id is not taken
+        {"kind": "task", "id": identifier, "token": "x"},
+    ]).to_string()})];
+    let text = format!("Ask @{identifier} in @General for @Owner about @Gone");
+    let requested = mentions::requested(&context, &text);
+    assert_eq!(requested.len(), 5);
+
+    // the owner sees the task and the project; the unknown doc and the identifier are dropped
+    let resolved = mentions::resolve(&owner, &requested).await;
+    let names: Vec<(Kind, &str, Option<&str>)> = resolved
+        .iter()
+        .map(|mention| (mention.kind, mention.name.as_str(), mention.key.as_deref()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            (Kind::Task, "Fix <b>login</b>", Some(identifier.as_str())),
+            (
+                Kind::Project,
+                "General",
+                Some(identifier.split('-').next().unwrap())
+            ),
+            (Kind::Person, "Owner", None),
+        ]
+    );
+
+    // the project turns private without the member: its task and the project are dropped for them
+    sqlx::query("UPDATE projects SET private = 1 WHERE id = $1")
+        .bind(w.project.to_string())
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let member = session_tools(&database, w.workspace, w.member).await;
+    let resolved = mentions::resolve(&member, &requested).await;
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|mention| (mention.kind, mention.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Kind::Person, w.owner.to_string().as_str())]
+    );
+    // what the model and the panel get: the server's names only, as untrusted data
+    let text = mentions::model_text("n0nce", &resolved).unwrap();
+    assert!(text.contains("- person \"Owner\""), "{text}");
+    assert!(!text.contains("login"), "{text}");
+    assert_eq!(
+        mentions::display(&resolved),
+        json!([{"kind": "person", "token": "Owner"}])
+    );
+}
+
+#[tokio::test]
+async fn a_runs_context_mentions_are_parsed_resolved_and_attached_to_its_message() {
+    use super::mentions::{self, Kind};
+    let input: super::RunInput = serde_json::from_value(json!({
+        "threadId": "thread",
+        "runId": "run",
+        "messages": [{"id": "m1", "role": "user", "content": "Look at @ENG-1 and @Ghost"}],
+        "context": [
+            {"description": "page", "value": "/tasks"},
+            {"description": "mentions", "value": json!([
+                {"kind": "task", "id": "t1", "token": "ENG-1"},
+                {"kind": "doc", "id": "d404", "token": "Ghost"},
+                {"kind": "person", "id": "u2", "token": "nobody"},
+            ]).to_string()},
+        ],
+    }))
+    .unwrap();
+    let tools = FakeTools::default();
+    let mut request = super::parse_input(&input).unwrap();
+    mentions::attach(
+        &mut request,
+        &input.context,
+        &tools,
+        &CancellationToken::new(),
+    )
+    .await;
+    let Input::Message { text, mentions, .. } = &request else {
+        panic!("a message");
+    };
+    assert_eq!(text, "Look at @ENG-1 and @Ghost");
+    // the doc cannot be read, so it is dropped; the person keeps no chip text ("@nobody" is not in the message)
+    assert_eq!(
+        mentions
+            .iter()
+            .map(|mention| (
+                mention.kind,
+                mention.id.as_str(),
+                mention.name.as_str(),
+                mention.token.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (Kind::Task, "t1", "Write the launch post", "ENG-1"),
+            (Kind::Person, "u2", "Grace Hopper", ""),
+        ]
+    );
+    // the server's own reads, not steps of the conversation
+    assert!(tools.calls.lock().unwrap().is_empty());
+    let mut names: Vec<String> = tools
+        .lookups
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["get_doc", "get_task", "list_members"]);
+
+    // a stopped run reads nothing in; an approval answer has no mentions
+    let mut request = super::parse_input(&input).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    mentions::attach(&mut request, &input.context, &tools, &cancel).await;
+    assert!(matches!(&request, Input::Message { mentions, .. } if mentions.is_empty()));
+    let mut resume = Input::Resume {
+        interrupt_id: "i".into(),
+        approved: true,
+        allow_for_conversation: false,
+    };
+    mentions::attach(
+        &mut resume,
+        &input.context,
+        &tools,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(resume, Input::Resume { .. }));
+}
+
+#[tokio::test]
+async fn a_message_with_mentions_tells_the_model_and_keeps_them_for_the_panel() {
+    use super::mentions::{Kind, Resolved};
+    let harness = Harness::new(vec![text("Looking at it.")]).await;
+    let mut state = state();
+    let (outcome, _) = harness
+        .run(
+            &mut state,
+            Input::Message {
+                text: "Summarize @ENG-1".into(),
+                page: None,
+                mentions: vec![Resolved {
+                    kind: Kind::Task,
+                    id: "t1".into(),
+                    key: Some("ENG-1".into()),
+                    name: "Fix login".into(),
+                    token: "ENG-1".into(),
+                }],
+            },
+        )
+        .await;
+    assert_eq!(outcome, Outcome::Finished);
+    let requests = harness.fake.requests();
+    let first = &requests[0]["messages"][0]["content"];
+    // the mentions come before the user's own text, as untrusted data with Orbit's names
+    let mentioned = first[0]["text"].as_str().unwrap();
+    assert!(mentioned.starts_with("<mentions>"), "{mentioned}");
+    assert!(
+        mentioned.contains("- task \"ENG-1\" \"Fix login\" (task id t1)"),
+        "{mentioned}"
+    );
+    assert!(
+        mentioned.contains("<untrusted-data-n0nce tool=\"mentions\">"),
+        "{mentioned}"
+    );
+    assert_eq!(first[1]["text"], "Summarize @ENG-1");
+    let user = state
+        .display
+        .iter()
+        .find(|message| message["role"] == "user")
+        .unwrap();
+    assert_eq!(user["content"], "Summarize @ENG-1");
+    assert_eq!(
+        user["metadata"]["mentions"],
+        json!([{"kind": "task", "token": "ENG-1"}])
     );
 }
 
@@ -3964,4 +4191,32 @@ async fn a_member_removed_from_the_workspace_loses_their_conversations() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn deleting_an_account_removes_only_that_users_conversations() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let members = store
+        .create(w.workspace, w.member, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &members, "Mine", now).await;
+    let owners = store
+        .create(w.workspace, w.owner, "b".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &owners, "The owner's", now).await;
+    crate::repositories::identity::IdentityRepository::new((*w.database).clone())
+        .delete_account(w.member, "test", now)
+        .await
+        .unwrap();
+    let left: Vec<String> = sqlx::query_scalar("SELECT user_id FROM assistant_conversations")
+        .fetch_all(w.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(left, [w.owner.to_string()]);
 }

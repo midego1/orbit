@@ -3,8 +3,8 @@
 // a waiting change with its exact arguments; the approval card only answers approve or decline, so a reload shows the
 // same card. The history (clock button) lists earlier chats; one opens read-only from its stored messages and cards,
 // and Continue makes it the active chat again (its old approvals have expired on the server).
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { HttpAgent } from '@ag-ui/client'
 import {
@@ -18,7 +18,7 @@ import {
   type ToolCallMessagePartProps,
 } from '@assistant-ui/react'
 import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime } from '@assistant-ui/react-ag-ui'
-import { ArrowLeft, ArrowUp, ArrowUpRight, Clock, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
+import { ArrowLeft, ArrowUpRight, Clock, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
 import { cn } from 'cn'
 import { InfoTip } from '@/components/common/InfoTip'
 import { Tip } from '@/components/common/Tip'
@@ -38,14 +38,15 @@ import { chatTitle } from './history'
 import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
+import { AssistantComposer, MentionChip } from './AssistantComposer'
+import { mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention } from './composer'
+import { useAskDraft } from './useAskDraft'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
 
 /** True inside an earlier conversation shown read-only: no step there can answer an approval. */
 const ReadOnlyContext = createContext(false)
 
 type View = { kind: 'chat' } | { kind: 'history' } | { kind: 'earlier'; id: string }
-
-const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
 
 /** Loads the user's conversation in this workspace, starts one when there is none, and mounts the runtime on it. */
 export default function AssistantPanel({ onClose }: { onClose: () => void }) {
@@ -289,6 +290,8 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   earlier?: Earlier
 }) {
   const [runError, setRunError] = useState<string | null>(null)
+  // the mentions of the message being sent (kinds and ids): the server reads each item again with the member's access
+  const mentions = useRef('[]')
   const agent = useMemo(() => new HttpAgent({ url: `${assistantBase(workspaceId)}/run`, threadId: conversation.id }), [workspaceId, conversation.id])
   // The server owns the conversation: the panel reads it once and never writes it back.
   const history = useMemo<ThreadHistoryAdapter>(
@@ -305,10 +308,16 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
     // a resume continues from the server's stored state: nothing is sent back
     resumeTranscript: 'appended',
     // only the path and the Follow along switch: the server looks up what the page is itself
-    getRunContext: () => [
-      { description: 'page', value: `${window.location.pathname}${window.location.search}` },
-      { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
-    ],
+    getRunContext: () => {
+      // a message's mentions go with its own run only (not with a later approval or message)
+      const mentioned = mentions.current
+      mentions.current = '[]'
+      return [
+        { description: 'page', value: `${window.location.pathname}${window.location.search}` },
+        { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
+        { description: 'mentions', value: mentioned },
+      ]
+    },
     onError: (error) => {
       setRunError(error.message || 'Ask AI stopped with an error.')
       if (/ended|start a new chat/i.test(error.message)) onGone()
@@ -322,6 +331,9 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
           onNewChat={onNewChat}
           onHistory={onHistory}
           earlier={earlier ? { ...earlier, title: chatTitle(conversation) } : undefined}
+          setMentions={(value) => {
+            mentions.current = value
+          }}
           runError={runError}
           clearError={() => setRunError(null)}
           onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
@@ -365,24 +377,26 @@ function isWaiting(approval: { approved?: boolean; resolution?: string } | undef
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, onStop }: {
+function Thread({ onClose, onNewChat, onHistory, earlier, setMentions: setRunMentions, runError, clearError, onStop }: {
   onClose: () => void
   onNewChat: () => void
   onHistory?: () => void
   /** Read-only: an earlier conversation, with Continue in place of the composer. */
   earlier?: Earlier & { title: string }
+  setMentions: (serialized: string) => void
   runError: string | null
   clearError: () => void
   onStop: () => void
 }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  const { workspace } = useWorkspace()
   const aui = useAui()
   const { follow, wide, focusToken } = useAssistantUi()
   const running = useAuiState((s) => s.thread.isRunning)
   // while the stored conversation loads, a sent message would be lost: the composer waits
   const loading = useAuiState((s) => s.thread.isLoading)
   const messages = useAuiState((s) => s.thread.messages)
-  const [draft, setDraft] = useState('')
   const [pageLink, setPageLink] = useState<string | null>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const root = useRef<HTMLElement>(null)
@@ -438,20 +452,28 @@ function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, 
   }, [focusToken])
   const [continuing, setContinuing] = useState(false)
 
-  function send(text = draft) {
+  function send(text: string, mentioned: Mention[] = []): boolean {
     const message = text.trim()
-    if (!message || running || waiting || loading) return
+    if (!message || running || waiting || loading) return false
     clearError()
-    aui.thread().append(message)
-    setDraft('')
+    setRunMentions(serializeMentions(mentioned))
+    // the message shows its mentions as chips (the server stores its own, checked list for a reload)
+    const shown = mentioned.map(({ kind, label }) => ({ kind, token: label }))
+    aui.thread().append({ role: 'user', content: [{ type: 'text', text: message }], metadata: { custom: shown.length ? { mentions: shown } : {} } })
+    return true
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault()
-      send()
-    }
-  }
+  // a suggestion that ends open ("Create a task: ") fills the field; the others are sent, and clear the field
+  const { draft, setDraft, mentions, setMentions, suggest } = useAskDraft(send, (at) =>
+    requestAnimationFrame(() => {
+      const element = input.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = element.selectionEnd = at
+    }),
+  )
+  const suggestions = suggestionsFor(`${location.pathname}${location.search}`)
+  const answered = !empty && !running && !waiting && last?.role === 'assistant' && draft === ''
 
   const tools = earlier ? null : (
     <>
@@ -495,17 +517,21 @@ function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, 
         <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
           <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
             <ThreadPrimitive.Empty>
-              <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
-                <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
-                <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
-                <div className="flex flex-col gap-1.5">
-                  {STARTERS.map((starter) => (
-                    <Button key={starter} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => send(starter)}>
-                      {starter}
-                    </Button>
-                  ))}
+              {/* an earlier chat is read-only: no suggestions */}
+              {earlier ? null : (
+                <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
+                  <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
+                  <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
+                  <div className="flex flex-col gap-1.5" aria-label="Suggestions" role="group">
+                    {suggestions.map((suggestion) => (
+                      <Button key={suggestion.label} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => suggest(suggestion)}>
+                        {suggestion.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Type / for commands, @ to mention a task, project, doc or person.</p>
                 </div>
-              </div>
+              )}
             </ThreadPrimitive.Empty>
             <ol className="flex flex-col gap-3 py-4" aria-live="polite">
               <ThreadPrimitive.Messages>{({ message }) => <Message role={message.role} />}</ThreadPrimitive.Messages>
@@ -557,54 +583,40 @@ function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, 
               Ask AI wants to show you a page: go there
             </button>
           ) : null}
+          {answered && !earlier ? (
+            <div role="group" aria-label="Suggestions" className="mx-3 mb-2 flex gap-1.5 overflow-x-auto [scrollbar-width:none]">
+              {suggestions.slice(0, 3).map((suggestion) => (
+                <button
+                  key={suggestion.label}
+                  type="button"
+                  className="shrink-0 rounded-full border px-2.5 py-1 text-xs whitespace-nowrap text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                  onClick={() => suggest(suggestion)}
+                >
+                  {suggestion.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {earlier ? null : (
-            <form
-              className="shrink-0 px-3 pb-3"
-              onSubmit={(event: FormEvent) => {
-                event.preventDefault()
-                send()
+            <AssistantComposer
+              workspaceId={workspace.id}
+              draft={draft}
+              setDraft={setDraft}
+              mentions={mentions}
+              setMentions={setMentions}
+              inputRef={input}
+              running={running}
+              waiting={waiting}
+              loading={loading}
+              onSend={send}
+              onStop={() => {
+                aui.thread().cancelRun()
+                onStop()
               }}
-            >
-              <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
-                <label htmlFor="ask-ai-input" className="sr-only">
-                  Message Ask AI
-                </label>
-                <textarea
-                  id="ask-ai-input"
-                  ref={input}
-                  rows={1}
-                  value={draft}
-                  disabled={waiting}
-                  placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
-                  className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={onKeyDown}
-                />
-                {running ? (
-                  <Tip label="Stop">
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="icon-sm"
-                      aria-label="Stop"
-                      onClick={() => {
-                        aui.thread().cancelRun()
-                        onStop()
-                      }}
-                    >
-                      <Stop />
-                    </Button>
-                  </Tip>
-                ) : (
-                  <Tip label="Send">
-                    <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
-                      <ArrowUp />
-                    </Button>
-                  </Tip>
-                )}
-              </div>
-              <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
-            </form>
+              onNewChat={onNewChat}
+              newChatDisabled={running}
+              footer={<p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>}
+            />
           )}
         </ThreadPrimitive.Root>
       </TaskChipContext>
@@ -624,7 +636,14 @@ function Message({ role }: { role: string }) {
 }
 
 function UserText({ text }: { text: string }) {
-  return <p className="rounded-lg bg-muted px-3 py-2 text-[0.8125rem] whitespace-pre-wrap text-foreground">{text}</p>
+  const mentions = useAuiState((s) => s.message.metadata?.custom?.mentions)
+  // plain text only: a mention is the user's own "@label" text, shown as a chip
+  const segments = useMemo(() => mentionSegments(text, readMentions(mentions)), [text, mentions])
+  return (
+    <p className="rounded-lg bg-muted px-3 py-2 text-[0.8125rem] whitespace-pre-wrap text-foreground">
+      {segments.map((segment, index) => (segment.mention ? <MentionChip key={index} kind={segment.mention} label={segment.text} className="mx-px" /> : <span key={index}>{segment.text}</span>))}
+    </p>
+  )
 }
 
 function AnswerText({ text }: { text: string }) {

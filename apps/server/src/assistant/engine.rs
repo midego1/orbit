@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::agui::{self, Emitter};
 use super::cards::{self, Names};
+use super::mentions;
 use super::model::{
     Block, Delta, Message, ModelProvider, ModelRequest, ProviderError, Role, StopReason, Usage,
 };
@@ -87,6 +88,8 @@ pub(crate) enum Input {
     Message {
         text: String,
         page: Option<String>,
+        /// The items the message names with "@", already read again with the member's access.
+        mentions: Vec<mentions::Resolved>,
     },
     Resume {
         interrupt_id: String,
@@ -168,7 +171,11 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         self.out.run_started(self.thread_id, self.run_id).await;
         let deadline = Instant::now() + self.limits.run_time;
         match input {
-            Input::Message { text, page } => self.start_message(state, &text, page.as_deref()),
+            Input::Message {
+                text,
+                page,
+                mentions,
+            } => self.start_message(state, &text, page.as_deref(), &mentions),
             Input::Resume {
                 interrupt_id,
                 approved,
@@ -194,7 +201,13 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         self.model_loop(state, deadline).await
     }
 
-    fn start_message(&self, state: &mut ConversationState, text: &str, page: Option<&str>) {
+    fn start_message(
+        &self,
+        state: &mut ConversationState,
+        text: &str,
+        page: Option<&str>,
+        mentioned: &[mentions::Resolved],
+    ) {
         let mut content = Vec::new();
         // A call still waiting for approval is answered as "moved on", with the rest of its turn.
         if let Some(pending) = state.pending.take() {
@@ -223,6 +236,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 text: format!("<page-context>{context}</page-context>"),
             });
         }
+        if let Some(text) = mentions::model_text(&state.nonce, mentioned) {
+            content.push(Block::Text { text });
+        }
         content.push(Block::Text {
             text: text.to_owned(),
         });
@@ -232,9 +248,13 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
             Some(last) if last.role == Role::User => last.content.extend(content),
             _ => state.transcript.push(Message::user(content)),
         }
-        state
-            .display
-            .push(agui::user_message(&format!("user-{}", Id::new_v7()), text));
+        let mut message = agui::user_message(&format!("user-{}", Id::new_v7()), text);
+        let shown = mentions::display(mentioned);
+        if shown.as_array().is_some_and(|list| !list.is_empty()) {
+            // the panel shows these "@label" texts of the message as chips
+            message["metadata"] = json!({"mentions": shown});
+        }
+        state.display.push(message);
         state.turn = TurnState::default();
     }
 

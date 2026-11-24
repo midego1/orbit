@@ -13,7 +13,8 @@
 //   list_task_statuses, then update_task (an approval with before → after); "tasks" / "open tasks": list_tasks, then an
 //   answer that quotes the totals Orbit worked out and names a few task keys (chips); "show GEN-1": get_task;
 //   "list docs": list_docs; "move GEN-2 to In Progress, then keep reading": the change, then get_task again and again
-//   until Orbit's step limit stops the run (its summary card must still show); anything else: an echo.
+//   until Orbit's step limit stops the run (its summary card must still show); a message with "@" mentions: the
+//   names Orbit resolved for them; anything else: an echo.
 
 const port = Number(process.argv[2] ?? 18_960)
 /** Optional pause before each answer (ms), so a recording looks like a real model at work. */
@@ -82,7 +83,12 @@ function firstId(value: unknown): string | undefined {
 
 function answer(messages: Message[]): Response {
   const userTexts = messages.filter((m) => m.role === 'user').flatMap((m) => (typeof m.content === 'string' ? [m.content] : m.content.filter((b) => b.type === 'text').map((b) => b.text ?? '')))
-  const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('<mentions>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  // the items the last message named with "@", as Orbit resolved them (one "- kind …" line each)
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user' && typeof m.content !== 'string' && m.content.some((b) => b.type === 'text'))
+  const mentioned = (typeof lastUser?.content === 'string' ? [] : (lastUser?.content ?? []))
+    .filter((b) => b.type === 'text' && b.text?.startsWith('<mentions>'))
+    .flatMap((b) => (b.text ?? '').split('\n').filter((line) => line.startsWith('- ')))
   // "…, then keep reading": after the change, read on until the step limit
   const keepReading = /,?\s*then keep reading\.?$/i.test(typed)
   const asked = typed.replace(/,?\s*then keep reading\.?$/i, '')
@@ -178,6 +184,7 @@ function answer(messages: Message[]): Response {
   if (showTask) return call('get_task', { task_id: showTask[1].toUpperCase() })
   if (/\btasks\b/i.test(asked)) return call('list_tasks', { limit: 100 }, 'Let me look up your tasks.')
   if (/projects/i.test(asked)) return call('list_projects', {})
+  if (mentioned.length) return say(`Orbit looked up what you mentioned:\n\n${mentioned.map((line) => `- ${line.slice(2).replace(/\s*\((\w+) id [^)]*\)$/, '')}`).join('\n')}`)
   return say(`You said: ${asked}`)
 }
 
