@@ -118,7 +118,7 @@ pub enum InstanceSettingsError {
 /// The job kinds whose limits the root user can change in Admin: the work that customers start.
 /// Maintenance kinds keep their limit of one.
 #[must_use]
-pub fn adjustable_job_kinds() -> [JobKind; 11] {
+pub fn adjustable_job_kinds() -> [JobKind; 13] {
     [
         crate::notion::import::scan_job_kind(),
         crate::notion::import::import_job_kind(),
@@ -130,6 +130,8 @@ pub fn adjustable_job_kinds() -> [JobKind; 11] {
         crate::trello::import::import_job_kind(),
         crate::obsidian::import::scan_job_kind(),
         crate::obsidian::import::import_job_kind(),
+        crate::outline::import::scan_job_kind(),
+        crate::outline::import::import_job_kind(),
         crate::workspace_export::job_kind(),
     ]
 }

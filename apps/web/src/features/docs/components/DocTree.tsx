@@ -53,6 +53,7 @@ import {
 } from '@/features/docs/pageTree'
 import { favoriteDropIndex, useMoveFavorite, usePageFavorites, useToggleFavorite } from '@/features/docs/api/favorites'
 import { useProjects } from '@/features/tasks/api/projects'
+import { useCan } from '@/features/workspaces/permissions'
 import { isPageVersionConflict, movePageErrorMessage, useCreatePage, useMovePage } from '@/features/docs/api/pages'
 import {
   teamspaceDeleteError,
@@ -107,6 +108,8 @@ export function DocTree({
   canDeleteTeamspaces,
   onTrash,
 }: DocTreeProps) {
+  // Only admins may import from Outline (an import keeps other members as page authors).
+  const canImportOutline = useCan('members.manage')
   const navigate = useNavigate()
   const inAppSidebar = useInAppSidebar()
   const teamspacesQuery = useTeamspaces(workspaceId)
@@ -547,6 +550,12 @@ export function DocTree({
           <Import className="size-[14px]" />
           Import from Obsidian
         </DropdownMenuItem>
+        {canImportOutline ? (
+          <DropdownMenuItem onClick={() => navigate('/docs/import/outline')}>
+            <Import className="size-[14px]" />
+            Import from Outline
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onClick={() => navigate('/docs/import/csv')}>
           <Import className="size-[14px]" />
           Import CSV

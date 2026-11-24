@@ -41,7 +41,7 @@ impl VaultLimits {
 
 /// Entries smaller than this are not checked for their compression ratio (tiny text files
 /// compress very well).
-const RATIO_FLOOR: u64 = 1024 * 1024;
+pub(crate) const RATIO_FLOOR: u64 = 1024 * 1024;
 
 /// Why an archive cannot be imported. The message is shown to the member as is.
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -140,7 +140,7 @@ pub fn note_title(path: &str) -> &str {
 
 /// A zip entry name as `/`-separated components, or why it is refused. Empty and `.`
 /// components are dropped.
-fn normalize(raw: &str) -> Result<Vec<&str>, VaultError> {
+pub(crate) fn normalize(raw: &str) -> Result<Vec<&str>, VaultError> {
     let unsafe_path = || VaultError::UnsafePath(raw.chars().take(200).collect());
     if raw.starts_with('/') || raw.starts_with('\\') || raw.contains('\0') {
         return Err(unsafe_path());
@@ -384,7 +384,7 @@ fn join(folder: &[&str], target: &str) -> Option<String> {
     Some(parts.join("/").to_lowercase())
 }
 
-fn read_error(error: zip::result::ZipError) -> VaultError {
+pub(crate) fn read_error(error: zip::result::ZipError) -> VaultError {
     match error {
         zip::result::ZipError::InvalidArchive(_) | zip::result::ZipError::UnsupportedArchive(_) => {
             VaultError::NotZip

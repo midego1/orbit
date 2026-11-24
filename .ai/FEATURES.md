@@ -459,6 +459,34 @@ favorites through `/pages/favorites` (list), `/pages/{page_id}/favorite` (PUT/DE
   `%%comments%%` and frontmatter dropped, the Notion page size cap. Same lifecycle rules as the Notion import (private,
   resumable, cancel keeps filled pages and trashes unfilled ones, trial page limit, read-only stop, 24 h expiry); the
   archive is deleted in every final state.
+- Outline import (`pages/OutlineImportPane.tsx`, `api/outlineImports.ts`; server `outline/` (`model.rs`, `archive.rs`,
+  `client.rs`, `convert.rs`, `import.rs`), routes `outline_import_routes.rs` under `/imports/outline` (`POST {base_url,
+  token}`, `POST /upload`, `GET`, `GET /{id}?include=preview`, `GET /{id}/warnings`, `POST /{id}/start {selection,
+  options, destination}`, `POST /{id}/cancel`); migration `20261112234436_outline_imports`: `outline_imports`,
+  `outline_import_items`, `outline_import_warnings`, `page_external_refs`). Workspace admins only (`members.manage`;
+  others get 403 and do not see the Settings row or the Docs "…" entry), because pages keep other members as authors.
+  Settings → Import and Docs "…" → "Import from Outline" open `/docs/import/outline` with two tabs: "Upload export"
+  (Outline's JSON or Markdown workspace export, detected from the contents; read from the stored zip one entry at a
+  time with the Obsidian archive checks; up to 5 GB through the platform's large-upload path) and "Connect via API"
+  (base URL, default `https://app.getoutline.com`, and an API key, checked with `auth.info`, stored encrypted and wiped
+  in every final state). `outline.scan` builds the tree (JSON: `documentStructure` order; Markdown: folders and zip
+  order, dates from entry comments; API: `collections.list`, `collections.documents` for order, `documents.list`
+  published + archived, `documents.deleted`, `templates.list`, `users.list`, offset/limit 100, `x-api-version: 3` for
+  ProseMirror `data`, 429 waits for `Retry-After`) → preview (collections with document, archived, template and
+  attachment counts; checkboxes; "Include archived and deleted documents", "Include templates") → `outline.import`:
+  pass 1 creates collection pages then documents parents first (icon if an emoji, Outline's createdAt, creator = the
+  member with the author's email) or reuses the live page in `page_external_refs` (`external_source = 'outline'`,
+  `external_id` `collection:`/`document:`/`template:`/`markdown:` + id or path); pass 2 converts ProseMirror
+  (`outline/convert.rs`: headings, lists, checklists, tables, code languages, notices → callouts, toggles, math, embeds
+  → links, images/attachments → page files, mentions, rules) or Markdown (`:::notice` → callout, relative `.md` links
+  and `uploads/` files resolved) with every `/doc/<slug>-<urlId>` link pointing to the new pages, keeps Outline's
+  updatedAt, and skips a reused page whose updatedAt (collections: a title/description hash) did not change.
+  Progress counts documents and attachments; the summary shows created/updated/unchanged/failed pages and a CSV of
+  the warnings (`outline_import_warnings`, first 5,000: unsupported blocks, failed attachments, unresolved links and
+  mentions). No email or inbox notice (the `notifications.import_source` CHECK would need a table rebuild). Dev:
+  `ORBIT_DEV_OUTLINE_IMPORT_LOCAL=1` allows `http://127.0.0.1:<port>` as the base URL. Mobile:
+  `settings/import/outline` (same flow; a segmented control for the two modes; the warnings CSV goes to the share
+  sheet).
 - Notion import (`pages/NotionImportPane.tsx`, `components/NotionImportChooser.tsx`, `api/notionImports.ts`,
   `import/selection.ts`; server `notion/import.rs`, routes `/imports/notion`): Documents header "…" → "Import from
   Notion" opens `/docs/import`, a pane next to the tree like Trash. Steps follow the import's status at

@@ -128,6 +128,7 @@ export default function App() {
                 <Route path="docs/trash/:pageId" element={<DocsPage view="trash" />} />
                 <Route path="docs/import/csv" element={<DocsPage view="csv-import" />} />
                 <Route path="docs/import/obsidian/:importId?" element={<DocsPage view="obsidian-import" />} />
+                <Route path="docs/import/outline/:importId?" element={<DocsPage view="outline-import" />} />
                 <Route path="docs/import/:importId?" element={<DocsPage view="import" />} />
                 <Route path="docs/:pageId/form/:viewId" element={<DocsPage view="form" />} />
                 <Route path="docs/:pageId?" element={<DocsPage />} />

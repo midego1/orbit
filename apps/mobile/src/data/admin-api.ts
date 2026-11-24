@@ -274,6 +274,8 @@ const JOB_LABELS: Record<string, string> = {
   'notion.import': 'Notion imports',
   'obsidian.scan': 'Obsidian scans',
   'obsidian.import': 'Obsidian imports',
+  'outline.scan': 'Outline scans',
+  'outline.import': 'Outline imports',
   'asana.scan': 'Asana scans',
   'asana.import': 'Asana imports',
   'linear.scan': 'Linear scans',

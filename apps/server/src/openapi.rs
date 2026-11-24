@@ -370,6 +370,13 @@ pub const CONTRACT_ID: &str = "orbit-api-v1";
         crate::orbit_import_routes::get_orbit_import,
         crate::orbit_import_routes::start_orbit_import,
         crate::orbit_import_routes::cancel_orbit_import,
+        crate::outline_import_routes::connect_outline_import,
+        crate::outline_import_routes::upload_outline_import,
+        crate::outline_import_routes::list_outline_imports,
+        crate::outline_import_routes::get_outline_import,
+        crate::outline_import_routes::list_outline_import_warnings,
+        crate::outline_import_routes::start_outline_import,
+        crate::outline_import_routes::cancel_outline_import,
         crate::chat_routes::conversations::list_chat_conversations,
         crate::chat_routes::conversations::create_chat_channel,
         crate::chat_routes::conversations::update_chat_channel,
@@ -1318,6 +1325,7 @@ fn problem_responses(operation_id: &str) -> BTreeMap<&'static str, String> {
             }
         }
         id if orbit_import_operation(id) => orbit_import_errors(id, &mut responses),
+        id if outline_import_operation(id) => outline_import_errors(id, &mut responses),
         id if task_operation(id) => task_errors(id, &mut responses),
         id if page_comment_operation(id) => page_comment_errors(id, &mut responses),
         id if page_operation(id) => page_errors(id, &mut responses),
@@ -1514,6 +1522,9 @@ fn invalid_request_operation(operation_id: &str) -> bool {
             | "start_trello_import"
             | "get_obsidian_import"
             | "start_obsidian_import"
+            | "connect_outline_import"
+            | "get_outline_import"
+            | "start_outline_import"
             | "update_import_person"
             | "create_orbit_import"
             | "get_orbit_import"
@@ -1656,6 +1667,51 @@ fn obsidian_import_errors(
             add_code(responses, "422", "obsidian_import_too_large");
         }
         "cancel_obsidian_import" => add_code(responses, "409", "obsidian_import_state_conflict"),
+        _ => {}
+    }
+}
+
+fn outline_import_operation(operation_id: &str) -> bool {
+    matches!(
+        operation_id,
+        "connect_outline_import"
+            | "upload_outline_import"
+            | "list_outline_imports"
+            | "get_outline_import"
+            | "list_outline_import_warnings"
+            | "start_outline_import"
+            | "cancel_outline_import"
+    )
+}
+
+fn outline_import_errors(
+    operation_id: &str,
+    responses: &mut BTreeMap<&'static str, Vec<&'static str>>,
+) {
+    add_code(responses, "403", "forbidden");
+    add_code(responses, "404", "outline_import_not_found");
+    match operation_id {
+        "connect_outline_import" => {
+            add_code(responses, "409", "import_in_progress");
+            add_code(responses, "422", "outline_url_invalid");
+            add_code(responses, "422", "outline_token_invalid");
+            add_code(responses, "502", "outline_unavailable");
+            add_code(responses, "503", "app_key_missing");
+        }
+        "upload_outline_import" => {
+            add_code(responses, "409", "import_in_progress");
+            add_code(responses, "413", "outline_archive_too_large");
+            add_code(responses, "422", "outline_archive_invalid");
+        }
+        "start_outline_import" => {
+            add_code(responses, "404", "page_not_found");
+            add_code(responses, "404", "teamspace_not_found");
+            add_code(responses, "409", "import_in_progress");
+            add_code(responses, "409", "outline_import_state_conflict");
+            add_code(responses, "422", "validation_failed");
+            add_code(responses, "422", "outline_import_too_large");
+        }
+        "cancel_outline_import" => add_code(responses, "409", "outline_import_state_conflict"),
         _ => {}
     }
 }

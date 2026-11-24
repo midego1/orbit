@@ -14,9 +14,11 @@ import { useMembers } from '@/features/workspaces/api'
 import { useCan } from '@/features/workspaces/permissions'
 import { useWorkspace } from '@/features/workspaces/workspaceContext'
 
-const SOURCES = [
+/** `admin`: only workspace admins (who manage members) may use it. */
+const SOURCES: { name: string; description: string; to: string; admin?: boolean }[] = [
   { name: 'Notion', description: 'Import pages and databases into Docs.', to: '/docs/import' },
   { name: 'Obsidian', description: 'Import a vault (.zip) into Docs.', to: '/docs/import/obsidian' },
+  { name: 'Outline', description: 'Import collections and documents into Docs.', to: '/docs/import/outline', admin: true },
   { name: 'CSV', description: 'Create a Docs database from a .csv file.', to: '/docs/import/csv' },
   { name: 'Asana', description: 'Import projects and their tasks into Tasks.', to: '/tasks-import' },
   { name: 'Linear', description: 'Import teams and their issues into Tasks.', to: '/tasks-import/linear' },
@@ -38,7 +40,7 @@ export function ImportPage() {
   return (
     <>
       <SettingsCard title="Import" flush>
-        {SOURCES.map((source) => (
+        {SOURCES.filter((source) => canManage || !source.admin).map((source) => (
           <SettingsRow key={source.name} className="flex-nowrap">
             <RowIcon>
               <Import />

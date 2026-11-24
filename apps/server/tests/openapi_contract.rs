@@ -105,6 +105,12 @@ fn openapi_generation_is_byte_stable_and_covers_public_routes() {
         "/api/v1/workspaces/{workspace_id}/imports/obsidian/{import_id}",
         "/api/v1/workspaces/{workspace_id}/imports/obsidian/{import_id}/start",
         "/api/v1/workspaces/{workspace_id}/imports/obsidian/{import_id}/cancel",
+        "/api/v1/workspaces/{workspace_id}/imports/outline",
+        "/api/v1/workspaces/{workspace_id}/imports/outline/upload",
+        "/api/v1/workspaces/{workspace_id}/imports/outline/{import_id}",
+        "/api/v1/workspaces/{workspace_id}/imports/outline/{import_id}/warnings",
+        "/api/v1/workspaces/{workspace_id}/imports/outline/{import_id}/start",
+        "/api/v1/workspaces/{workspace_id}/imports/outline/{import_id}/cancel",
         "/api/v1/workspaces/{workspace_id}/import-people",
         "/api/v1/workspaces/{workspace_id}/import-people/{person_id}",
     ] {

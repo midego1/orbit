@@ -1,5 +1,5 @@
 /**
- * The workspace imports (Notion and Obsidian into Docs; Asana, Linear and Trello into Tasks; Orbit into all three) over the SDK,
+ * The workspace imports (Notion, Obsidian and Outline into Docs; Asana, Linear and Trello into Tasks; Orbit into all three) over the SDK,
  * with the web's error sentences, report notes, and the pure tree logic of the "Choose pages" step. No React.
  */
 import {
@@ -8,6 +8,8 @@ import {
   cancelNotionImport,
   cancelObsidianImport,
   cancelOrbitImport,
+  cancelOutlineImport,
+  connectOutlineImport,
   cancelTrelloImport,
   createAsanaImport,
   createLinearImport,
@@ -20,6 +22,7 @@ import {
   getNotionImport,
   getObsidianImport,
   getOrbitImport,
+  getOutlineImport,
   getTrelloImport,
   listImportPeople,
   listAsanaImports,
@@ -27,15 +30,19 @@ import {
   listNotionImports,
   listObsidianImports,
   listOrbitImports,
+  listOutlineImportWarnings,
+  listOutlineImports,
   listTrelloImports,
   startAsanaImport,
   startLinearImport,
   startNotionImport,
   startObsidianImport,
   startOrbitImport,
+  startOutlineImport,
   startTrelloImport,
   updateImportPerson,
   uploadOrbitImport,
+  uploadOutlineImport,
 } from '@orbit/api/generated/sdk.gen'
 import { notionDatabaseNotes } from '@orbit/database/notionImport'
 import type {
@@ -50,11 +57,15 @@ import type {
   ObsidianImport,
   ObsidianSkippedFiles,
   OrbitImport,
+  OutlineImport,
+  OutlineImportPreview,
+  OutlineImportWarning,
   StartAsanaImportBody,
   StartLinearImportBody,
   StartNotionImportBody,
   StartObsidianImportBody,
   StartOrbitImportBody,
+  StartOutlineImportBody,
   StartTrelloImportBody,
   TrelloImport,
 } from '@orbit/api/generated/types.gen'
@@ -63,7 +74,7 @@ import { ApiProblem } from '@orbit/api/problem'
 
 import type { OrbitClient, PageSummary, Teamspace } from './orbit'
 
-export type ImportKind = 'notion' | 'obsidian' | 'asana' | 'linear' | 'trello' | 'orbit'
+export type ImportKind = 'notion' | 'obsidian' | 'outline' | 'asana' | 'linear' | 'trello' | 'orbit'
 
 interface Records {
   notion: NotionImport
@@ -72,6 +83,7 @@ interface Records {
   linear: LinearImport
   trello: TrelloImport
   orbit: OrbitImport
+  outline: OutlineImport
 }
 interface StartBodies {
   notion: StartNotionImportBody
@@ -80,10 +92,21 @@ interface StartBodies {
   linear: StartLinearImportBody
   trello: StartTrelloImportBody
   orbit: StartOrbitImportBody
+  outline: StartOutlineImportBody
+}
+/** What the ready step chooses from: the scan tree, or Outline's preview (collections with counts). */
+interface Trees {
+  notion: NonNullable<NotionImport['tree']>
+  obsidian: NonNullable<ObsidianImport['tree']>
+  asana: NonNullable<AsanaImport['tree']>
+  linear: NonNullable<LinearImport['tree']>
+  trello: NonNullable<TrelloImport['tree']>
+  orbit: NonNullable<OrbitImport['tree']>
+  outline: OutlineImportPreview
 }
 
 export type ImportRecord<K extends ImportKind> = Records[K]
-export type ImportTree<K extends ImportKind> = NonNullable<Records[K]['tree']>
+export type ImportTree<K extends ImportKind> = Trees[K]
 export type StartBody<K extends ImportKind> = StartBodies[K]
 /** Every import goes through the same states. */
 export type ImportStatus = NotionImportStatus
@@ -99,10 +122,10 @@ export const importKeys = {
 }
 
 /** Into Docs (pages) or into Tasks (projects). */
-export const docsImport = (kind: ImportKind) => kind === 'notion' || kind === 'obsidian'
+export const docsImport = (kind: ImportKind) => kind === 'notion' || kind === 'obsidian' || kind === 'outline'
 
 // The SDK's six families have the same shape; one loose signature serves them all, typed again per kind below.
-type Call = (options: { client: OrbitClient; path: Record<string, string>; query?: { include: 'tree' }; body?: unknown; throwOnError: true }) => Promise<{ data: unknown }>
+type Call = (options: { client: OrbitClient; path: Record<string, string>; query?: { include: 'tree' | 'preview' }; body?: unknown; throwOnError: true }) => Promise<{ data: unknown }>
 interface Calls {
   list: Call
   get: Call
@@ -112,6 +135,7 @@ interface Calls {
 const SDK = {
   notion: { list: listNotionImports, get: getNotionImport, start: startNotionImport, cancel: cancelNotionImport },
   obsidian: { list: listObsidianImports, get: getObsidianImport, start: startObsidianImport, cancel: cancelObsidianImport },
+  outline: { list: listOutlineImports, get: getOutlineImport, start: startOutlineImport, cancel: cancelOutlineImport },
   asana: { list: listAsanaImports, get: getAsanaImport, start: startAsanaImport, cancel: cancelAsanaImport },
   linear: { list: listLinearImports, get: getLinearImport, start: startLinearImport, cancel: cancelLinearImport },
   trello: { list: listTrelloImports, get: getTrelloImport, start: startTrelloImport, cancel: cancelTrelloImport },
@@ -136,10 +160,14 @@ export async function getImport<K extends ImportKind>(client: OrbitClient, kind:
   return (await SDK[kind].get({ client, path: importPath(workspaceId, importId), throwOnError: true })).data as ImportRecord<K>
 }
 
-/** The scan tree of a `ready` import (`?include=tree`); it does not change any more. */
+/** The scan tree of a `ready` import (`?include=tree`; Outline: `?include=preview`); it does not change any more. */
 export async function getImportTree<K extends ImportKind>(client: OrbitClient, kind: K, workspaceId: string, importId: string): Promise<ImportTree<K> | null> {
+  if (kind === 'outline') {
+    const { data } = await SDK.outline.get({ client, path: importPath(workspaceId, importId), query: { include: 'preview' }, throwOnError: true })
+    return (data as OutlineImport).preview as ImportTree<K> | null
+  }
   const { data } = await SDK[kind].get({ client, path: importPath(workspaceId, importId), query: { include: 'tree' }, throwOnError: true })
-  return (data as ImportRecord<K>).tree as ImportTree<K> | null
+  return (data as { tree: ImportTree<K> | null }).tree
 }
 
 export async function startImport<K extends ImportKind>(client: OrbitClient, kind: K, workspaceId: string, importId: string, body: StartBody<K>): Promise<ImportRecord<K>> {
@@ -202,6 +230,41 @@ export async function uploadOrbit(client: OrbitClient, workspaceId: string, file
   return (await uploadOrbitImport({ client, path: { workspace_id: workspaceId }, body: { file }, bodySerializer: form, signal, throwOnError: true })).data
 }
 
+/** Uploads an Outline export zip as the `file` part under its own name, and starts the scan. */
+export async function uploadOutline(client: OrbitClient, workspaceId: string, file: Blob, name: string, signal: AbortSignal): Promise<OutlineImport> {
+  const form = () => {
+    const body = new FormData()
+    body.append('file', file, name)
+    return body
+  }
+  return (await uploadOutlineImport({ client, path: { workspace_id: workspaceId }, body: { file }, bodySerializer: form, signal, throwOnError: true })).data
+}
+
+/** Connects Outline's API (base URL and API key, sent once) and starts the scan. */
+export async function connectOutline(client: OrbitClient, workspaceId: string, baseUrl: string, token: string): Promise<OutlineImport> {
+  return (await connectOutlineImport({ client, path: { workspace_id: workspaceId }, body: { base_url: baseUrl, token }, throwOnError: true })).data
+}
+
+/** The warnings of an Outline import (the first 5,000). */
+export async function outlineWarnings(client: OrbitClient, workspaceId: string, importId: string): Promise<OutlineImportWarning[]> {
+  return (await listOutlineImportWarnings({ client, path: importPath(workspaceId, importId), throwOnError: true })).data.items
+}
+
+/** A CSV cell: quoted when it holds a comma, quote or line break; a leading formula sign is neutralized. */
+function csvCell(value: string): string {
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value
+  return /[",\n\r]/.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe
+}
+
+/** The web's `warningsCsv`: the warnings as CSV (page, kind, detail). */
+export function warningsCsv(warnings: readonly OutlineImportWarning[]): string {
+  const rows = [['Page', 'Kind', 'Detail'], ...warnings.map((warning) => [warning.title, warning.kind, warning.detail])]
+  return `${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`
+}
+
+/** Outline's cloud; a self-hosted Outline has its own address. */
+export const OUTLINE_CLOUD_URL = 'https://app.getoutline.com'
+
 export async function createOrbit(client: OrbitClient, workspaceId: string, url: string, token: string): Promise<OrbitImport> {
   return (await createOrbitImport({ client, path: { workspace_id: workspaceId }, body: { url, token }, throwOnError: true })).data
 }
@@ -244,7 +307,7 @@ export function importHeadline(status: ImportStatus): string {
 
 export const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
 
-const SOURCE: Record<ImportKind, string> = { notion: 'Notion', obsidian: 'Obsidian', asana: 'Asana', linear: 'Linear', trello: 'Trello', orbit: 'Orbit' }
+const SOURCE: Record<ImportKind, string> = { notion: 'Notion', obsidian: 'Obsidian', outline: 'Outline', asana: 'Asana', linear: 'Linear', trello: 'Trello', orbit: 'Orbit' }
 
 /** A user-facing sentence for a failed import request, as each web import page words it. */
 export function importErrorMessage(kind: ImportKind, error: unknown): string {
@@ -273,6 +336,18 @@ export function importErrorMessage(kind: ImportKind, error: unknown): string {
         return 'Upload the vault as one .zip file.'
       case 'obsidian_import_too_large':
         return 'An import can contain at most 5,000 pages. Select fewer notes.'
+      case 'forbidden':
+        return kind === 'outline' ? 'Only workspace admins can import from Outline.' : 'You do not have access to this import.'
+      case 'outline_archive_too_large':
+        return 'The export is larger than the server’s upload limit.'
+      case 'outline_archive_invalid':
+        return 'Upload the Outline export as one .zip file.'
+      case 'outline_url_invalid':
+        return 'Enter the https:// address of your Outline workspace, for example https://app.getoutline.com.'
+      case 'outline_token_invalid':
+        return 'Outline did not accept the API key. Check that you copied all of it and that it has not expired.'
+      case 'outline_import_too_large':
+        return 'An import can contain at most 10,000 pages. Select fewer collections.'
       case 'asana_token_invalid':
         return 'Asana rejected this token. Check that you copied the whole token and that it was not revoked.'
       case 'linear_token_invalid':
@@ -287,10 +362,10 @@ export function importErrorMessage(kind: ImportKind, error: unknown): string {
       case 'teamspace_not_found':
         return 'The destination teamspace no longer exists. Choose another one.'
     }
-    if ((kind === 'obsidian' || kind === 'orbit') && error.status === 413) return 'The file is larger than the server’s upload limit.'
+    if ((kind === 'obsidian' || kind === 'orbit' || kind === 'outline') && error.status === 413) return 'The file is larger than the server’s upload limit.'
     if (error.status === 422) return 'The request was not valid. Check your input and try again.'
   }
-  if ((kind === 'obsidian' || kind === 'orbit') && error instanceof TypeError) return 'The server could not be reached. Check your connection and try again.'
+  if ((kind === 'obsidian' || kind === 'orbit' || kind === 'outline') && error instanceof TypeError) return 'The server could not be reached. Check your connection and try again.'
   return 'Something went wrong. Try again.'
 }
 
@@ -356,6 +431,13 @@ export function importNotes<K extends ImportKind>(kind: K, item: ImportRecord<K>
     push(unresolved, unresolved === 1 ? '1 link points to a note or file that was not imported; it stayed as text.' : `${unresolved} links point to notes or files that were not imported; they stayed as text.`)
     push(truncated, truncated === 1 ? '1 block was cut from a note that was too large.' : `${truncated} blocks were cut from notes that were too large.`)
     push(trashed, trashed === 1 ? '1 empty page the import had created was moved to the trash.' : `${trashed} empty pages the import had created were moved to the trash.`)
+  } else if (kind === 'outline') {
+    const report = (item as OutlineImport).report
+    if (!report) return notes
+    push(report.files_failed, `${plural(report.files_failed, 'attachment', 'attachments')} could not be imported.`)
+    push(report.too_large_files, `${plural(report.too_large_files, 'file over the upload limit was', 'files over the upload limit were')} skipped.`)
+    push(report.truncated_blocks, `${plural(report.truncated_blocks, 'block was', 'blocks were')} cut from documents that were too large.`)
+    push(report.unfilled_pages_trashed, `${plural(report.unfilled_pages_trashed, 'empty page', 'empty pages')} the import had created ${report.unfilled_pages_trashed === 1 ? 'was' : 'were'} moved to the trash.`)
   } else if (kind === 'asana') {
     const report = (item as AsanaImport).report
     if (!report) return notes
@@ -636,6 +718,15 @@ export function linearImportProgress(item: LinearImport): ImportProgressView {
     default:
       return { label: 'Importing issues…', step: null, done: done + failed, total, detail: imported }
   }
+}
+
+/** An Outline import's progress: documents and attachments done out of the total. */
+export function outlineImportProgress(item: OutlineImport): ImportProgressView {
+  const { done, total, failed, skipped, attachments_done: filesDone, attachments_total: filesTotal } = item.progress
+  if (item.status === 'queued') return { label: 'Waiting for the import to start…', step: null, done: 0, total: 0, detail: '' }
+  const documents = `${count(done + skipped)} of ${count(total)} documents`
+  const files = filesTotal > 0 ? ` · ${count(filesDone)} of ${count(filesTotal)} attachments` : ''
+  return { label: 'Importing documents…', step: null, done: done + failed + skipped, total, detail: `${documents}${files}` }
 }
 
 /** The rate-limit notice while Linear makes the import wait, else null. */

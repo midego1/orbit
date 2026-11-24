@@ -34,6 +34,7 @@ import { DocTree } from '@/features/docs/components/DocTree'
 import { DocPageActionsContext, type DocPageActions } from '@/features/docs/pageActions'
 import { NotionImportPane } from './NotionImportPane'
 import { ObsidianImportPane } from './ObsidianImportPane'
+import { OutlineImportPane } from './OutlineImportPane'
 import { CsvImportPane } from './CsvImportPane'
 import { PageTrashPane } from './PageTrashPane'
 import { DatabaseFormPage } from '@/features/docs/database/DatabaseFormPage'
@@ -49,7 +50,7 @@ function landsOnFirstPage() {
   return typeof window.matchMedia !== 'function' || window.matchMedia('(min-width: 900px)').matches
 }
 
-export function DocsPage({ view = 'page' }: { view?: 'page' | 'trash' | 'import' | 'obsidian-import' | 'csv-import' | 'form' }) {
+export function DocsPage({ view = 'page' }: { view?: 'page' | 'trash' | 'import' | 'obsidian-import' | 'outline-import' | 'csv-import' | 'form' }) {
   const { pageId, importId, viewId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
@@ -195,6 +196,8 @@ export function DocsPage({ view = 'page' }: { view?: 'page' | 'trash' | 'import'
     content = <NotionImportPane key={importId ?? 'new'} workspaceId={workspace.id} importId={importId} />
   } else if (view === 'obsidian-import') {
     content = <ObsidianImportPane key={importId ?? 'new'} workspaceId={workspace.id} importId={importId} />
+  } else if (view === 'outline-import') {
+    content = <OutlineImportPane key={importId ?? 'new'} workspaceId={workspace.id} importId={importId} />
   } else if (view === 'csv-import') {
     content = <CsvImportPane workspaceId={workspace.id} />
   } else if (view === 'form' && pageId && viewId) {

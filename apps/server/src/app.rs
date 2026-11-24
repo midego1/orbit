@@ -50,6 +50,9 @@ use crate::obsidian::import::{ObsidianImportService, ObsidianImportSettings};
 use crate::obsidian_import_routes::ObsidianImportState;
 use crate::orbit_import::{OrbitImportService, OrbitImportSettings};
 use crate::orbit_import_routes::OrbitImportState;
+use crate::outline::client::RetryPolicy;
+use crate::outline::import::{OutlineImportService, OutlineImportSettings};
+use crate::outline_import_routes::OutlineImportState;
 use crate::page_comment_routes::PageCommentState;
 use crate::page_file_routes::PageFileState;
 use crate::page_routes::PageState;
@@ -438,6 +441,24 @@ impl App {
                 allow_local: orbit_import_local,
             },
         );
+        // Development only: an Outline import may name http://127.0.0.1:<port> as its base URL
+        // (`ORBIT_DEV_OUTLINE_IMPORT_LOCAL=1`).
+        let outline_import_local = config.environment
+            == orbit_platform::EnvironmentMode::Development
+            && std::env::var("ORBIT_DEV_OUTLINE_IMPORT_LOCAL").is_ok_and(|value| value == "1");
+        let outline_imports = OutlineImportService::new(
+            database.clone(),
+            PageFileRepository::new(database.clone(), attachment_state.uploads.clone()),
+            object_storage.clone(),
+            &config.data.backups,
+            OutlineImportSettings {
+                max_archive_bytes: crate::outline::import::MAX_ARCHIVE_BYTES,
+                max_file_bytes: config.uploads.max_file_bytes,
+                app_key,
+                allow_local: outline_import_local,
+                retry: RetryPolicy::default(),
+            },
+        );
         let asana_imports = AsanaImportService::new(
             database.clone(),
             crate::repositories::attachments::AttachmentRepository::new(
@@ -482,6 +503,7 @@ impl App {
             obsidian_imports.clone(),
             import_notices,
             orbit_imports.clone(),
+            outline_imports.clone(),
             workspace_exports.clone(),
             billing.clone(),
             crate::webhooks::Deliverer::new(
@@ -641,6 +663,11 @@ impl App {
                     orbit_imports,
                     cookie_mode,
                 ),
+                outline_imports: OutlineImportState::new(
+                    Arc::clone(&identity),
+                    outline_imports,
+                    cookie_mode,
+                ),
                 chat: ChatState::new(
                     Arc::clone(&identity),
                     attachment_state.uploads.clone(),
@@ -680,11 +707,15 @@ impl App {
             HttpLimits {
                 max_body_bytes: usize::try_from(upload_limits.max_request_bytes())
                     .unwrap_or(usize::MAX),
-                // Orbit archive imports go above the upload limit; the route checks its own.
+                // Orbit and Outline archive imports go above the upload limit; the routes check
+                // their own.
                 large_upload: Some(LargeUpload {
-                    path_suffix: crate::orbit_import_routes::UPLOAD_PATH_SUFFIX,
+                    path_suffixes: &[
+                        crate::orbit_import_routes::UPLOAD_PATH_SUFFIX,
+                        crate::outline_import_routes::UPLOAD_PATH_SUFFIX,
+                    ],
                     max_bytes: crate::orbit_import_routes::upload_body_limit(
-                        crate::orbit_import::MAX_ARCHIVE_BYTES,
+                        crate::orbit_import::MAX_ARCHIVE_BYTES.max(crate::outline::import::MAX_ARCHIVE_BYTES),
                     ),
                 }),
                 ..HttpLimits::default()
@@ -1184,6 +1215,7 @@ async fn initialize_production_services(
     obsidian_imports: ObsidianImportService,
     import_notices: crate::import_notice::ImportNotices,
     orbit_imports: OrbitImportService,
+    outline_imports: OutlineImportService,
     workspace_exports: WorkspaceExportService,
     billing: Option<crate::billing::Billing>,
     webhooks: crate::webhooks::Deliverer,
@@ -1240,6 +1272,7 @@ async fn initialize_production_services(
             let trello_cleanup = trello_imports.clone();
             let obsidian_cleanup = obsidian_imports.clone();
             let orbit_cleanup = orbit_imports.clone();
+            let outline_cleanup = outline_imports.clone();
             // One hourly schedule expires and fails stale imports of every source.
             worker.with_handler(maintenance_kind(NOTION_CLEANUP), move |_| {
                 let service = cleanup.clone();
@@ -1248,6 +1281,7 @@ async fn initialize_production_services(
                 let trello = trello_cleanup.clone();
                 let obsidian = obsidian_cleanup.clone();
                 let orbit = orbit_cleanup.clone();
+                let outline = outline_cleanup.clone();
                 async move {
                     service
                         .expire_stale(TimestampMillis::now())
@@ -1279,6 +1313,12 @@ async fn initialize_production_services(
                         .await
                         .map_err(|_| {
                             JobError::Retryable("Obsidian import cleanup failed".to_owned())
+                        })?;
+                    outline
+                        .expire_stale(TimestampMillis::now())
+                        .await
+                        .map_err(|_| {
+                            JobError::Retryable("Outline import cleanup failed".to_owned())
                         })?;
                     orbit
                         .expire_stale(TimestampMillis::now())
@@ -1330,6 +1370,7 @@ async fn initialize_production_services(
             crate::obsidian::import::register_jobs(worker, obsidian_imports, import_notices.clone())
         })
         .and_then(|worker| crate::orbit_import::register_jobs(worker, orbit_imports))
+        .and_then(|worker| crate::outline::import::register_jobs(worker, outline_imports))
         .and_then(|worker| {
             worker.with_handler(dns_check_kind(), move |context| {
                 let checker = dns_checker.clone();

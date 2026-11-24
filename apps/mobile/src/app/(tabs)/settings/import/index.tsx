@@ -11,9 +11,11 @@ import { errorMessage } from '../../../../session-context'
 import { useTheme } from '../../../../theme'
 import { Button, Icon, Spinner, LabelTip } from '../../../../ui'
 
-const SOURCES: readonly { name: string; description: string; href: Href }[] = [
+/** `admin`: only workspace admins (who manage members) may use it. */
+const SOURCES: readonly { name: string; description: string; href: Href; admin?: boolean }[] = [
   { name: 'Notion', description: 'Import pages and databases into Docs.', href: '/settings/import/notion' },
   { name: 'Obsidian', description: 'Import a vault (.zip) into Docs.', href: '/settings/import/obsidian' },
+  { name: 'Outline', description: 'Import collections and documents into Docs.', href: '/settings/import/outline', admin: true },
   { name: 'Asana', description: 'Import projects and their tasks into Tasks.', href: '/settings/import/asana' },
   { name: 'Linear', description: 'Import teams and their issues into Tasks.', href: '/settings/import/linear' },
   { name: 'Trello', description: 'Import boards and their cards into Tasks.', href: '/settings/import/trello' },
@@ -35,7 +37,7 @@ export default function ImportScreen() {
   return (
     <SettingsShell title="Settings" nav={WORKSPACE_NAV}>
       <SettingsCard title="Import" flush>
-        {SOURCES.map((source) => (
+        {SOURCES.filter((source) => canManage || !source.admin).map((source) => (
           // the web's `SettingsRow` here has no hairline between the sources
           <View key={source.name} className="flex-row items-center gap-3 px-4 py-3">
             <View className="size-9 items-center justify-center rounded-lg bg-muted">

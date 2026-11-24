@@ -9,7 +9,7 @@ pub struct HttpLimits {
     /// The largest `multipart/form-data` body: file uploads. The upload routes check their own
     /// limits too.
     pub max_body_bytes: usize,
-    /// One upload route that may go above `max_body_bytes` (a whole-workspace archive import).
+    /// Upload routes that may go above `max_body_bytes` (whole-workspace archive imports).
     pub large_upload: Option<LargeUpload>,
     /// The largest body of any other request (JSON, forms, webhooks). `max_body_bytes` caps it too.
     pub max_other_body_bytes: usize,
@@ -20,10 +20,10 @@ pub struct HttpLimits {
     pub request_timeout: Option<Duration>,
 }
 
-/// A multipart request whose path ends with `path_suffix` may send up to `max_bytes`.
+/// A multipart request whose path ends with one of `path_suffixes` may send up to `max_bytes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LargeUpload {
-    pub path_suffix: &'static str,
+    pub path_suffixes: &'static [&'static str],
     pub max_bytes: usize,
 }
 
@@ -57,7 +57,12 @@ impl HttpLimits {
             });
         if multipart {
             match self.large_upload {
-                Some(large) if request.uri().path().ends_with(large.path_suffix) => {
+                Some(large)
+                    if large
+                        .path_suffixes
+                        .iter()
+                        .any(|suffix| request.uri().path().ends_with(suffix)) =>
+                {
                     large.max_bytes.max(self.max_body_bytes)
                 }
                 _ => self.max_body_bytes,
@@ -196,7 +201,7 @@ mod tests {
         let limits = HttpLimits {
             max_body_bytes: 100 * mib,
             large_upload: Some(LargeUpload {
-                path_suffix: "/imports/orbit/upload",
+                path_suffixes: &["/imports/orbit/upload", "/imports/outline/upload"],
                 max_bytes: 5 * 1024 * mib,
             }),
             ..HttpLimits::default()
@@ -205,6 +210,8 @@ mod tests {
         let archive = "/api/v1/workspaces/w/imports/orbit/upload";
         assert!(!limits.request_is_too_large(&request_to(archive, multipart, 200 * mib)));
         assert!(limits.request_is_too_large(&request_to(archive, multipart, 5 * 1024 * mib + 1)));
+        let outline = "/api/v1/workspaces/w/imports/outline/upload";
+        assert!(!limits.request_is_too_large(&request_to(outline, multipart, 600 * mib)));
         // Not multipart, or another upload route: the normal limits.
         assert!(limits.request_is_too_large(&request_to(archive, "application/json", 3 * mib)));
         assert!(limits.request_is_too_large(&request(multipart, 200 * mib)));
