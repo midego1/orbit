@@ -4,12 +4,15 @@
 //! - `registry`: the tools, their risk and the page that shows their result.
 //! - `model`, `anthropic`: the provider trait and the Anthropic Messages streaming client.
 //! - `engine`: the run loop (approvals, limits, stopping), `prompt`: what the model is told.
-//! - `store`: conversations, kept for a few hours; `settings`: the sealed key, usage, rate limit.
+//! - `store`: conversations and their history (per member, 30 days); `settings`: the sealed key, usage, rate limit.
 //! - `agui`: the AG-UI 1.0 events the panel reads over SSE.
 //!
 //! Routes (session cookie; members of the workspace only):
 //! `GET  /api/v1/assistant/workspaces/{id}/conversation` the current conversation and setup state,
-//! `POST /api/v1/assistant/workspaces/{id}/conversations` a new conversation,
+//! `GET  /api/v1/assistant/workspaces/{id}/conversations` the member's history (newest first, `?before=` cursor),
+//! `POST /api/v1/assistant/workspaces/{id}/conversations` a new conversation (the current one is archived),
+//! `GET|PATCH|DELETE /api/v1/assistant/workspaces/{id}/conversations/{conversation}` open, rename, delete one,
+//! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/continue` make it the active one again,
 //! `POST /api/v1/assistant/workspaces/{id}/run` one AG-UI run (SSE),
 //! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/stop`,
 //! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/undo` (undo changes Ask AI made, `undo.rs`),
@@ -20,6 +23,7 @@ pub(crate) mod agui;
 pub(crate) mod anthropic;
 pub(crate) mod cards;
 pub(crate) mod engine;
+pub(crate) mod mentions;
 pub(crate) mod model;
 pub(crate) mod prompt;
 pub(crate) mod registry;
@@ -34,7 +38,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -62,7 +66,9 @@ use model::Usage;
 use settings::{
     AiSettings, DEFAULT_MODEL, OFFERED_MODELS, SettingsError, SettingsRepository, estimated_cost,
 };
-use store::{Conversation, ConversationState, ConversationStore, MAX_STATE_BYTES};
+use store::{
+    Conversation, ConversationState, ConversationStore, Deleted, MAX_STATE_BYTES, Summary, Switch,
+};
 
 /// The audit `request_id` of everything Ask AI does, and of its tool writes.
 pub const REQUEST_ID: &str = "assistant";
@@ -216,7 +222,20 @@ pub(crate) fn router(state: AssistantState) -> Router {
     let base = "/api/v1/assistant/workspaces/{workspace_id}";
     Router::new()
         .route(&format!("{base}/conversation"), get(current_conversation))
-        .route(&format!("{base}/conversations"), post(new_conversation))
+        .route(
+            &format!("{base}/conversations"),
+            get(list_conversations).post(new_conversation),
+        )
+        .route(
+            &format!("{base}/conversations/{{conversation_id}}"),
+            get(open_conversation)
+                .patch(rename_conversation)
+                .delete(delete_conversation),
+        )
+        .route(
+            &format!("{base}/conversations/{{conversation_id}}/continue"),
+            post(continue_conversation),
+        )
         .route(
             &format!("{base}/conversations/{{conversation_id}}/stop"),
             post(stop),
@@ -324,7 +343,12 @@ fn setup_word(key: &KeyState) -> &'static str {
 
 /// The summary cards of a conversation with each change's undo state as it is now (the cards were stored as they were
 /// when the message ended).
-fn with_undo_states(messages: &mut [Value], state: &ConversationState, now: TimestampMillis) {
+fn with_undo_states(
+    messages: &mut [Value],
+    state: &ConversationState,
+    now: TimestampMillis,
+    active: bool,
+) {
     for message in messages.iter_mut() {
         if message["role"] != "tool" {
             continue;
@@ -348,6 +372,13 @@ fn with_undo_states(messages: &mut [Value], state: &ConversationState, now: Time
             let Some(id) = change["undo"]["id"].as_str() else {
                 continue;
             };
+            // an earlier chat of the history is read-only: no Undo there
+            if !active {
+                if let Some(fields) = change.as_object_mut() {
+                    fields.remove("undo");
+                }
+                continue;
+            }
             let word = state
                 .undo
                 .iter()
@@ -364,8 +395,10 @@ fn with_undo_states(messages: &mut [Value], state: &ConversationState, now: Time
 /// The AG-UI messages of a conversation, with the approval card that waits, if any.
 fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value {
     let mut messages = conversation.state.display.clone();
-    with_undo_states(&mut messages, &conversation.state, now);
-    if let Some(pending) = &conversation.state.pending
+    with_undo_states(&mut messages, &conversation.state, now, conversation.active);
+    // only the active conversation can answer an approval: an archived one never shows its card
+    if conversation.active
+        && let Some(pending) = &conversation.state.pending
         && let Some(message) = messages
             .iter_mut()
             .rev()
@@ -375,10 +408,245 @@ fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value
     }
     json!({
         "id": conversation.id.to_string(),
+        "title": conversation.title,
         "messages": messages,
+        "messageCount": conversation.message_count,
+        "active": conversation.active,
+        "createdAt": conversation.created_at,
+        "updatedAt": conversation.updated_at,
         "expiresAt": conversation.expires_at,
         "busy": conversation.busy_until.is_some_and(|until| until > now.as_millis()),
     })
+}
+
+/// A conversation as the history lists it.
+fn summary_view(summary: &Summary) -> Value {
+    json!({
+        "id": summary.id.to_string(),
+        "title": summary.title,
+        "messageCount": summary.message_count,
+        "active": summary.active,
+        "createdAt": summary.created_at,
+        "updatedAt": summary.updated_at,
+    })
+}
+
+const HISTORY_PAGE: i64 = 50;
+const MAX_HISTORY_PAGE: i64 = 100;
+
+#[derive(Deserialize)]
+struct ListQuery {
+    /// The `nextCursor` of the previous page.
+    before: Option<String>,
+    limit: Option<i64>,
+}
+
+fn parse_cursor(cursor: &str) -> Option<(i64, Id)> {
+    let (updated_at, id) = cursor.split_once('.')?;
+    Some((updated_at.parse().ok()?, id.parse().ok()?))
+}
+
+fn unavailable() -> Response {
+    problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
+}
+
+fn no_conversation() -> Response {
+    problem(StatusCode::NOT_FOUND, "not_found", "No such conversation.")
+}
+
+fn still_working() -> Response {
+    problem(
+        StatusCode::CONFLICT,
+        "busy",
+        "Ask AI is still working; stop it first.",
+    )
+}
+
+/// The member's own conversations in this workspace, newest use first. Nobody else's: not even a
+/// workspace owner or admin can list, open, rename or delete another member's conversations.
+async fn list_conversations(
+    State(state): State<AssistantState>,
+    Path(workspace): Path<String>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let before = match query.before.as_deref().filter(|cursor| !cursor.is_empty()) {
+        None => None,
+        Some(cursor) => match parse_cursor(cursor) {
+            Some(cursor) => Some(cursor),
+            None => return problem(StatusCode::BAD_REQUEST, "invalid_cursor", "Bad cursor."),
+        },
+    };
+    let limit = query
+        .limit
+        .unwrap_or(HISTORY_PAGE)
+        .clamp(1, MAX_HISTORY_PAGE);
+    let mut rows = match state
+        .store
+        .list(
+            member.workspace_id,
+            member.user_id,
+            before,
+            limit,
+            TimestampMillis::now(),
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "assistant conversations could not be listed");
+            return unavailable();
+        }
+    };
+    let more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let next = more
+        .then(|| rows.last())
+        .flatten()
+        .map(|last| format!("{}.{}", last.updated_at, last.id));
+    Json(json!({
+        "conversations": rows.iter().map(summary_view).collect::<Vec<_>>(),
+        "nextCursor": next,
+    }))
+    .into_response()
+}
+
+fn conversation_id(raw: &str) -> Option<Id> {
+    raw.parse::<Id>().ok()
+}
+
+/// One of the member's conversations with its messages, as the panel showed them.
+async fn open_conversation(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
+    };
+    let now = TimestampMillis::now();
+    match state
+        .store
+        .get(id, member.workspace_id, member.user_id, now)
+        .await
+    {
+        Ok(Some(conversation)) => {
+            Json(json!({"conversation": conversation_view(&conversation, now)})).into_response()
+        }
+        Ok(None) => no_conversation(),
+        Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameInput {
+    title: String,
+}
+
+async fn rename_conversation(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<RenameInput>,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
+    };
+    let Some(title) = store::clean_title(&input.title) else {
+        return problem(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_title",
+            "Give the chat a name of at most 120 characters.",
+        );
+    };
+    match state
+        .store
+        .rename(
+            id,
+            member.workspace_id,
+            member.user_id,
+            &title,
+            TimestampMillis::now(),
+        )
+        .await
+    {
+        Ok(Some(summary)) => Json(json!({"conversation": summary_view(&summary)})).into_response(),
+        Ok(None) => no_conversation(),
+        Err(_) => unavailable(),
+    }
+}
+
+async fn delete_conversation(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
+    };
+    match state
+        .store
+        .delete(
+            id,
+            member.workspace_id,
+            member.user_id,
+            TimestampMillis::now(),
+        )
+        .await
+    {
+        Ok(Deleted::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Deleted::Busy) => still_working(),
+        Ok(Deleted::NotFound) => no_conversation(),
+        Err(_) => unavailable(),
+    }
+}
+
+/// Makes an earlier conversation the active one again. The conversation that was active is
+/// archived, and its waiting approval expires.
+async fn continue_conversation(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
+    };
+    let now = TimestampMillis::now();
+    match state
+        .store
+        .resume(id, member.workspace_id, member.user_id, now)
+        .await
+    {
+        Ok(Switch::Done(conversation)) => {
+            Json(json!({"conversation": conversation_view(&conversation, now)})).into_response()
+        }
+        Ok(Switch::Busy) => still_working(),
+        Ok(Switch::NotFound) => no_conversation(),
+        Err(error) => {
+            tracing::warn!(%error, "assistant conversation could not be continued");
+            unavailable()
+        }
+    }
 }
 
 async fn current_conversation(
@@ -443,11 +711,7 @@ async fn new_conversation(
         Ok(Some(conversation)) => {
             Json(json!({"conversation": conversation_view(&conversation, now)})).into_response()
         }
-        Ok(None) => problem(
-            StatusCode::CONFLICT,
-            "busy",
-            "Ask AI is still working; stop it first.",
-        ),
+        Ok(None) => still_working(),
         Err(error) => {
             tracing::warn!(%error, "assistant conversation could not be created");
             problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
@@ -576,12 +840,19 @@ pub(crate) async fn undo_for(
         ));
     }
     let now = TimestampMillis::now();
-    // only the owner's own conversation, while it lives
+    // only the owner's own conversation, and only the active one: an earlier chat of the history is read-only
     let conversation = match state
         .store
         .get(conversation_id, member.workspace_id, member.user_id, now)
         .await
     {
+        Ok(Some(conversation)) if !conversation.active => {
+            return Err(problem(
+                StatusCode::CONFLICT,
+                "read_only",
+                "This is an earlier chat: continue it to undo its changes.",
+            ));
+        }
         Ok(Some(conversation)) => conversation,
         Ok(None) => {
             return Err(problem(
@@ -609,10 +880,10 @@ pub(crate) async fn undo_for(
         }
         Err(_) => return Err(unavailable()),
     }
-    // the state as the last run saved it
+    // the state as the last run saved it, still the active conversation
     let fresh = match state
         .store
-        .get(
+        .get_active(
             conversation_id,
             member.workspace_id,
             member.user_id,
@@ -824,7 +1095,11 @@ fn parse_input(input: &RunInput) -> Result<Input, &'static str> {
         .find(|entry| entry["description"] == "page")
         .and_then(|entry| entry["value"].as_str())
         .map(str::to_owned);
-    Ok(Input::Message { text, page })
+    Ok(Input::Message {
+        text,
+        page,
+        mentions: Vec::new(),
+    })
 }
 
 /// An SSE response that only carries a short message (no run happens).
@@ -870,10 +1145,11 @@ async fn run(
     let (thread_id, run_id) = (input.thread_id.clone(), input.run_id.clone());
     let now = TimestampMillis::now();
     let conversation = match input.thread_id.parse::<Id>() {
+        // only the member's active conversation runs (an archived one must be continued first)
         Ok(id) => {
             state
                 .store
-                .get(id, member.workspace_id, member.user_id, now)
+                .get_active(id, member.workspace_id, member.user_id, now)
                 .await
         }
         Err(_) => Ok(None),
@@ -886,7 +1162,7 @@ async fn run(
                 &run_id,
                 None,
                 Some((
-                    "This conversation has ended. Start a new chat.",
+                    "This conversation has ended (another chat is open now). Start a new chat, or continue it from the history.",
                     "conversation_gone",
                 )),
             );
@@ -969,7 +1245,7 @@ async fn run(
     // the state as the previous run saved it
     conversation = match state
         .store
-        .get(
+        .get_active(
             conversation.id,
             member.workspace_id,
             member.user_id,
@@ -982,6 +1258,11 @@ async fn run(
     };
     if conversation.state.nonce.is_empty() {
         conversation.state.nonce = prompt::new_nonce();
+    }
+    // A chat left alone longer than the panel keeps it open (a tab left open) starts afresh, as a
+    // continued one does: what waited for approval expires and "Allow in this chat" ends.
+    if now.as_millis() - conversation.updated_at > store::IDLE_MS {
+        engine::retire(&mut conversation.state);
     }
     let workspace_name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
         .bind(member.workspace_id.to_string())
@@ -1043,6 +1324,7 @@ async fn run(
             }
         });
     }
+    let context = input.context.clone();
     let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, api_key);
     tokio::spawn(async move {
         let emitter = Emitter::new(sender);
@@ -1050,6 +1332,9 @@ async fn run(
             tools: state.tools.clone(),
             principal,
         };
+        // the member's mentions, read again with their own access (before the run, outside any transaction)
+        let mut request = request;
+        mentions::attach(&mut request, &context, &tools, &cancel).await;
         let hooks = DbHooks {
             state: state.clone(),
             conversation: conversation.clone(),

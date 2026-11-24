@@ -1,8 +1,10 @@
-// The Ask AI panel. The conversation is kept on the server (per user and workspace, a few hours): the panel loads it,
-// mounts the AG-UI runtime on it and streams runs from `POST …/run`. The server stores a waiting change with its exact
-// arguments; the approval card only answers approve or decline, so a reload shows the same card.
-import { useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
-import { Link, useNavigate } from 'react-router'
+// The Ask AI panel. The conversation is kept on the server (per user and workspace, with a history of earlier ones):
+// the panel loads the active one, mounts the AG-UI runtime on it and streams runs from `POST …/run`. The server stores
+// a waiting change with its exact arguments; the approval card only answers approve or decline, so a reload shows the
+// same card. The history (clock button) lists earlier chats; one opens read-only from its stored messages and cards,
+// and Continue makes it the active chat again (its old approvals have expired on the server).
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { HttpAgent } from '@ag-ui/client'
 import {
@@ -16,8 +18,9 @@ import {
   type ToolCallMessagePartProps,
 } from '@assistant-ui/react'
 import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime, useAgUiSubmitInterruptResponses } from '@assistant-ui/react-ag-ui'
-import { ArrowUp, ArrowUpRight, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
+import { ArrowLeft, ArrowUpRight, Clock, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
 import { cn } from 'cn'
+import { InfoTip } from '@/components/common/InfoTip'
 import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
@@ -29,15 +32,23 @@ import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
-import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, undoChanges, type AssistantConversation, type AssistantStatus } from './api'
+import { assistantBase, assistantKeys, continueConversation, fetchAssistantStatus, openConversation, startConversation, stopConversation, undoChanges, type AssistantConversation, type AssistantStatus, type ConversationSummary } from './api'
+import { AssistantHistory } from './AssistantHistory'
+import { chatTitle } from './history'
 import { Fields, PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { BatchApprovalCard } from './BatchApprovalCard'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { BATCH_TOOL, detailsOpen, knownTasks, outcomeLine, readBatch, readBatchResult, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { UndoContext, type UndoChanges } from './undoContext'
+import { AssistantComposer, MentionChip } from './AssistantComposer'
+import { mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention } from './composer'
+import { useAskDraft } from './useAskDraft'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepOutcome, type StepView } from './toolSteps'
 
-const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
+/** True inside an earlier conversation shown read-only: no step there can answer an approval. */
+const ReadOnlyContext = createContext(false)
+
+type View = { kind: 'chat' } | { kind: 'history' } | { kind: 'earlier'; id: string }
 
 /** Loads the user's conversation in this workspace, starts one when there is none, and mounts the runtime on it. */
 export default function AssistantPanel({ onClose }: { onClose: () => void }) {
@@ -46,22 +57,50 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
   const key = assistantKeys.status(workspace.id)
   const status = useQuery({ queryKey: key, queryFn: () => fetchAssistantStatus(workspace.id), refetchOnWindowFocus: false })
   const [startError, setStartError] = useState<string | null>(null)
+  const [view, setView] = useState<View>({ kind: 'chat' })
+  const [switchError, setSwitchError] = useState<string | null>(null)
   const starting = useRef(false)
   const ready = status.data?.setup === 'ready'
   const conversation = status.data?.conversation ?? null
 
-  async function newChat() {
+  function showConversation(next: AssistantConversation) {
+    client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, conversation: next } : old))
+    void client.invalidateQueries({ queryKey: assistantKeys.history(workspace.id) })
+  }
+
+  /** Starts a new chat; the current one moves to the history. From the history, a refusal (a run still works) shows there. */
+  async function newChat(fromHistory = false, stay = false) {
     if (starting.current) return
     starting.current = true
     setStartError(null)
+    setSwitchError(null)
     try {
       const started = await startConversation(workspace.id)
-      client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, conversation: started.conversation } : old))
+      showConversation(started.conversation)
+      if (!stay) setView({ kind: 'chat' })
     } catch (error) {
-      setStartError(error instanceof Error ? error.message : 'A new chat could not be started.')
+      const message = error instanceof Error ? error.message : 'A new chat could not be started.'
+      if (fromHistory) setSwitchError(message)
+      else setStartError(message)
     } finally {
       starting.current = false
     }
+  }
+
+  async function continueChat(id: string) {
+    setSwitchError(null)
+    try {
+      const resumed = await continueConversation(workspace.id, id)
+      showConversation(resumed.conversation)
+      setView({ kind: 'chat' })
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : 'This chat could not be continued.')
+    }
+  }
+
+  function openFromHistory(summary: ConversationSummary) {
+    setSwitchError(null)
+    setView(summary.id === conversation?.id ? { kind: 'chat' } : { kind: 'earlier', id: summary.id })
   }
 
   // no conversation yet (first use, or the last one expired): start one
@@ -116,26 +155,145 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
       </PanelShell>
     )
   }
+  const back = () => {
+    setSwitchError(null)
+    setView({ kind: 'chat' })
+  }
+  return (
+    <>
+      {/* the chat stays mounted under the history, so a run that works keeps streaming */}
+      <div className={view.kind === 'chat' ? 'flex h-full min-h-0 w-full' : 'hidden'}>
+        <ConversationRuntime
+          key={conversation.id}
+          workspaceId={workspace.id}
+          conversation={conversation}
+          onClose={onClose}
+          onNewChat={() => void newChat()}
+          onHistory={() => setView({ kind: 'history' })}
+          onGone={() => void status.refetch()}
+        />
+      </div>
+      {view.kind === 'history' ? (
+        <PanelShell
+          onClose={onClose}
+          title="History"
+          leading={<BackButton onBack={back} />}
+          tools={
+            <Tip label="New chat">
+              <Button variant="ghost" size="icon-sm" aria-label="New chat" onClick={() => void newChat(true)}>
+                <Edit2 />
+              </Button>
+            </Tip>
+          }
+        >
+          {switchError ? (
+            <p role="alert" className="mx-3 mt-3 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+              {switchError}
+            </p>
+          ) : null}
+          <AssistantHistory
+            workspaceId={workspace.id}
+            onOpen={openFromHistory}
+            onDeleted={(deleted) => {
+              // the open chat is gone: a fresh one takes its place (the history stays in view)
+              if (deleted.id === conversation.id) void newChat(true, true)
+            }}
+          />
+        </PanelShell>
+      ) : null}
+      {view.kind === 'earlier' ? (
+        <EarlierConversation
+          key={view.id}
+          workspaceId={workspace.id}
+          id={view.id}
+          onClose={onClose}
+          onBack={() => setView({ kind: 'history' })}
+          onContinue={() => continueChat(view.id)}
+          onActive={(open) => {
+            // the open chat, newer than this panel's copy: load it fresh
+            if (open.id !== conversation.id) void status.refetch()
+            setView({ kind: 'chat' })
+          }}
+          error={switchError}
+        />
+      ) : null}
+    </>
+  )
+}
+
+function BackButton({ onBack, label = 'Back to the chat' }: { onBack: () => void; label?: string }) {
+  return (
+    <Tip label={label}>
+      <Button variant="ghost" size="icon-sm" aria-label={label} className="-ml-2" onClick={onBack}>
+        <ArrowLeft />
+      </Button>
+    </Tip>
+  )
+}
+
+/** An earlier conversation, read-only: its stored messages and the server's cards, as they were. */
+function EarlierConversation({ workspaceId, id, onClose, onBack, onContinue, onActive, error }: {
+  workspaceId: string
+  id: string
+  onClose: () => void
+  onBack: () => void
+  onContinue: () => Promise<void>
+  /** The server says this is the open chat after all (continued in another tab): show it live. */
+  onActive: (conversation: AssistantConversation) => void
+  error: string | null
+}) {
+  const opened = useQuery({ queryKey: assistantKeys.conversation(workspaceId, id), queryFn: () => openConversation(workspaceId, id), refetchOnWindowFocus: false, gcTime: 0 })
+  const active = opened.data?.conversation.active ? opened.data.conversation : null
+  useEffect(() => {
+    if (active) onActive(active)
+    // once per answer
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
+  if (active) return null
+  if (opened.isPending || opened.isError) {
+    return (
+      <PanelShell onClose={onClose} title="History" leading={<BackButton onBack={onBack} label="Back to the history" />}>
+        {opened.isPending ? (
+          <Notice>
+            <Spinner className="size-4 text-muted-foreground" />
+          </Notice>
+        ) : (
+          <Notice title="This chat could not be opened" text={opened.error.message}>
+            <Button variant="outline" size="sm" onClick={onBack}>
+              Back to the history
+            </Button>
+          </Notice>
+        )}
+      </PanelShell>
+    )
+  }
   return (
     <ConversationRuntime
-      key={conversation.id}
-      workspaceId={workspace.id}
-      conversation={conversation}
+      workspaceId={workspaceId}
+      conversation={opened.data.conversation}
       onClose={onClose}
-      onNewChat={() => void newChat()}
-      onGone={() => void status.refetch()}
+      onNewChat={() => {}}
+      onGone={() => {}}
+      earlier={{ onBack, onContinue, error }}
     />
   )
 }
 
-function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onGone }: {
+type Earlier = { onBack: () => void; onContinue: () => Promise<void>; error: string | null }
+
+function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onHistory, onGone, earlier }: {
   workspaceId: string
   conversation: AssistantConversation
   onClose: () => void
   onNewChat: () => void
+  onHistory?: () => void
   onGone: () => void
+  /** An earlier conversation, shown read-only (no runs). */
+  earlier?: Earlier
 }) {
   const [runError, setRunError] = useState<string | null>(null)
+  // the mentions of the message being sent (kinds and ids): the server reads each item again with the member's access
+  const mentions = useRef('[]')
   const agent = useMemo(() => new HttpAgent({ url: `${assistantBase(workspaceId)}/run`, threadId: conversation.id }), [workspaceId, conversation.id])
   // The server owns the conversation: the panel reads it once and never writes it back.
   const history = useMemo<ThreadHistoryAdapter>(
@@ -152,10 +310,16 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
     // a resume continues from the server's stored state: nothing is sent back
     resumeTranscript: 'appended',
     // only the path and the Follow along switch: the server looks up what the page is itself
-    getRunContext: () => [
-      { description: 'page', value: `${window.location.pathname}${window.location.search}` },
-      { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
-    ],
+    getRunContext: () => {
+      // a message's mentions go with its own run only (not with a later approval or message)
+      const mentioned = mentions.current
+      mentions.current = '[]'
+      return [
+        { description: 'page', value: `${window.location.pathname}${window.location.search}` },
+        { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
+        { description: 'mentions', value: mentioned },
+      ]
+    },
     onError: (error) => {
       setRunError(error.message || 'Ask AI stopped with an error.')
       if (/ended|start a new chat/i.test(error.message)) onGone()
@@ -165,26 +329,35 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   const undo = useMemo<UndoChanges>(() => async (ids) => (await undoChanges(workspaceId, conversation.id, ids)).results, [workspaceId, conversation.id])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <UndoContext value={undo}>
+      <ReadOnlyContext value={!!earlier}>
+        {/* an earlier chat of the history is read-only: no Undo there */}
+        <UndoContext value={earlier ? null : undo}>
         <Thread
           onClose={onClose}
           onNewChat={onNewChat}
+          onHistory={onHistory}
+          earlier={earlier ? { ...earlier, title: chatTitle(conversation) } : undefined}
+          setMentions={(value) => {
+            mentions.current = value
+          }}
           runError={runError}
           clearError={() => setRunError(null)}
           onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
         />
-      </UndoContext>
+        </UndoContext>
+      </ReadOnlyContext>
     </AssistantRuntimeProvider>
   )
 }
 
-/** The panel's header and body. `tools` are the header buttons of a running conversation. */
-function PanelShell({ onClose, tools, children, ref }: { onClose: () => void; tools?: ReactNode; children: ReactNode; ref?: Ref<HTMLElement> }) {
+/** The panel's header and body. `tools` are the header buttons of a running conversation; `leading` (a Back button)
+ * takes the place of the icon. */
+function PanelShell({ onClose, title = 'Ask AI', leading, tools, children, ref }: { onClose: () => void; title?: string; leading?: ReactNode; tools?: ReactNode; children: ReactNode; ref?: Ref<HTMLElement> }) {
   return (
-    <section ref={ref} aria-label="Ask AI" className="flex h-full min-h-0 w-full flex-col bg-background">
+    <section ref={ref} aria-label={title === 'Ask AI' ? 'Ask AI' : `Ask AI: ${title}`} className="flex h-full min-h-0 w-full flex-col bg-background">
       <header className="flex min-h-12 shrink-0 items-center gap-1 border-b py-1.5 pr-2 pl-4">
-        <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />
-        <h2 className="ml-1.5 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold text-foreground">Ask AI</h2>
+        {leading ?? <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />}
+        <h2 className="ml-1.5 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold text-foreground">{title}</h2>
         {tools}
         <Tip label="Close">
           <Button variant="ghost" size="icon-sm" aria-label="Close Ask AI" onClick={onClose}>
@@ -211,21 +384,26 @@ function isWaiting(approval: { approved?: boolean; resolution?: string } | undef
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
+function Thread({ onClose, onNewChat, onHistory, earlier, setMentions: setRunMentions, runError, clearError, onStop }: {
   onClose: () => void
   onNewChat: () => void
+  onHistory?: () => void
+  /** Read-only: an earlier conversation, with Continue in place of the composer. */
+  earlier?: Earlier & { title: string }
+  setMentions: (serialized: string) => void
   runError: string | null
   clearError: () => void
   onStop: () => void
 }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  const { workspace } = useWorkspace()
   const aui = useAui()
   const { follow, wide, focusToken } = useAssistantUi()
   const running = useAuiState((s) => s.thread.isRunning)
   // while the stored conversation loads, a sent message would be lost: the composer waits
   const loading = useAuiState((s) => s.thread.isLoading)
   const messages = useAuiState((s) => s.thread.messages)
-  const [draft, setDraft] = useState('')
   const [pageLink, setPageLink] = useState<string | null>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const root = useRef<HTMLElement>(null)
@@ -266,38 +444,58 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   // says "Changing …"
   const thinking = running && !callInFlight && run.state === 'thinking'
 
+  // an earlier conversation never runs: the page edge and status line stay with the active chat
   useEffect(() => {
-    assistantUi.setRun(run)
+    if (!earlier) assistantUi.setRun(run)
     // the run is derived from these two
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, messages])
-  useEffect(() => () => assistantUi.setRun(IDLE_RUN), [])
+  useEffect(() => () => {
+    if (!earlier) assistantUi.setRun(IDLE_RUN)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   useEffect(() => {
     input.current?.focus()
   }, [focusToken])
+  const [continuing, setContinuing] = useState(false)
 
-  function send(text = draft) {
+  function send(text: string, mentioned: Mention[] = []): boolean {
     const message = text.trim()
-    if (!message || running || waiting || loading) return
+    if (!message || running || waiting || loading) return false
     clearError()
-    aui.thread().append(message)
-    setDraft('')
+    setRunMentions(serializeMentions(mentioned))
+    // the message shows its mentions as chips (the server stores its own, checked list for a reload)
+    const shown = mentioned.map(({ kind, label }) => ({ kind, token: label }))
+    aui.thread().append({ role: 'user', content: [{ type: 'text', text: message }], metadata: { custom: shown.length ? { mentions: shown } : {} } })
+    return true
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault()
-      send()
-    }
-  }
+  // a suggestion that ends open ("Create a task: ") fills the field; the others are sent, and clear the field
+  const { draft, setDraft, mentions, setMentions, suggest } = useAskDraft(send, (at) =>
+    requestAnimationFrame(() => {
+      const element = input.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = element.selectionEnd = at
+    }),
+  )
+  const suggestions = suggestionsFor(`${location.pathname}${location.search}`)
+  const answered = !empty && !running && !waiting && last?.role === 'assistant' && draft === ''
 
-  const tools = (
+  const tools = earlier ? null : (
     <>
       <Tip label={follow ? 'Follow along is on: the page goes where Ask AI works' : 'Follow along is off: Ask AI shows a link instead'}>
         <Button variant="ghost" size="icon-sm" aria-label="Follow along" aria-pressed={follow} className={cn(follow ? 'text-foreground' : 'text-muted-foreground')} onClick={() => assistantUi.setFollow(!follow)}>
           {follow ? <Eye /> : <EyeSlash />}
         </Button>
       </Tip>
+      {onHistory ? (
+        <Tip label="History">
+          <Button variant="ghost" size="icon-sm" aria-label="Chat history" onClick={onHistory}>
+            <Clock />
+          </Button>
+        </Tip>
+      ) : null}
       {!empty ? (
         <Tip label="New chat">
           <Button variant="ghost" size="icon-sm" aria-label="New chat" disabled={running} onClick={onNewChat}>
@@ -314,23 +512,33 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   )
 
   return (
-    <PanelShell ref={root} onClose={onClose} tools={tools}>
-      <AssistantStatusLine />
+    <PanelShell
+      ref={root}
+      onClose={onClose}
+      tools={tools}
+      title={earlier?.title}
+      leading={earlier ? <BackButton onBack={earlier.onBack} label="Back to the history" /> : undefined}
+    >
+      {earlier ? null : <AssistantStatusLine />}
       <TaskChipContext value={textRun}>
         <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
           <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
             <ThreadPrimitive.Empty>
-              <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
-                <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
-                <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
-                <div className="flex flex-col gap-1.5">
-                  {STARTERS.map((starter) => (
-                    <Button key={starter} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => send(starter)}>
-                      {starter}
-                    </Button>
-                  ))}
+              {/* an earlier chat is read-only: no suggestions */}
+              {earlier ? null : (
+                <div className="flex min-h-full flex-col justify-end gap-3 pb-4">
+                  <p className="text-sm font-semibold text-foreground">What can Ask AI do for you?</p>
+                  <p className="text-[0.8125rem] text-muted-foreground">Ask about your tasks, docs and chats, or tell it what to change. You approve each change before it is made.</p>
+                  <div className="flex flex-col gap-1.5" aria-label="Suggestions" role="group">
+                    {suggestions.map((suggestion) => (
+                      <Button key={suggestion.label} variant="outline" size="sm" className="h-auto justify-start py-1.5 text-left whitespace-normal" disabled={loading} onClick={() => suggest(suggestion)}>
+                        {suggestion.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Type / for commands, @ to mention a task, project, doc or person.</p>
                 </div>
-              </div>
+              )}
             </ThreadPrimitive.Empty>
             <ol className="flex flex-col gap-3 py-4" aria-live="polite">
               <ThreadPrimitive.Messages>{({ message }) => <Message role={message.role} />}</ThreadPrimitive.Messages>
@@ -342,12 +550,37 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
               ) : null}
             </ol>
           </ThreadPrimitive.Viewport>
-          {runError ? (
+          {earlier ? (
+            <div className="flex shrink-0 flex-col gap-2 border-t px-3 py-3">
+              {earlier.error ? (
+                <p role="alert" className="rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+                  {earlier.error}
+                </p>
+              ) : null}
+              <div className="flex items-center gap-2">
+                <p className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted-foreground">
+                  An earlier chat
+                  <InfoTip text="Read-only. Continue it to ask more. A change it asked for that you did not approve has expired: Ask AI asks again." />
+                </p>
+                <Button
+                  size="sm"
+                  disabled={continuing}
+                  onClick={() => {
+                    setContinuing(true)
+                    void earlier.onContinue().finally(() => setContinuing(false))
+                  }}
+                >
+                  Continue this chat
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {runError && !earlier ? (
             <p role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
               {runError}
             </p>
           ) : null}
-          {!follow && pageLink ? (
+          {!follow && pageLink && !earlier ? (
             <button
               type="button"
               className="mx-3 mb-2 flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-left text-xs text-foreground transition-colors outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -357,53 +590,41 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
               Ask AI wants to show you a page: go there
             </button>
           ) : null}
-          <form
-            className="shrink-0 px-3 pb-3"
-            onSubmit={(event: FormEvent) => {
-              event.preventDefault()
-              send()
-            }}
-          >
-            <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
-              <label htmlFor="ask-ai-input" className="sr-only">
-                Message Ask AI
-              </label>
-              <textarea
-                id="ask-ai-input"
-                ref={input}
-                rows={1}
-                value={draft}
-                disabled={waiting}
-                placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
-                className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={onKeyDown}
-              />
-              {running ? (
-                <Tip label="Stop">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="icon-sm"
-                    aria-label="Stop"
-                    onClick={() => {
-                      aui.thread().cancelRun()
-                      onStop()
-                    }}
-                  >
-                    <Stop />
-                  </Button>
-                </Tip>
-              ) : (
-                <Tip label="Send">
-                  <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
-                    <ArrowUp />
-                  </Button>
-                </Tip>
-              )}
+          {answered && !earlier ? (
+            <div role="group" aria-label="Suggestions" className="mx-3 mb-2 flex gap-1.5 overflow-x-auto [scrollbar-width:none]">
+              {suggestions.slice(0, 3).map((suggestion) => (
+                <button
+                  key={suggestion.label}
+                  type="button"
+                  className="shrink-0 rounded-full border px-2.5 py-1 text-xs whitespace-nowrap text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                  onClick={() => suggest(suggestion)}
+                >
+                  {suggestion.label}
+                </button>
+              ))}
             </div>
-            <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
-          </form>
+          ) : null}
+          {earlier ? null : (
+            <AssistantComposer
+              workspaceId={workspace.id}
+              draft={draft}
+              setDraft={setDraft}
+              mentions={mentions}
+              setMentions={setMentions}
+              inputRef={input}
+              running={running}
+              waiting={waiting}
+              loading={loading}
+              onSend={send}
+              onStop={() => {
+                aui.thread().cancelRun()
+                onStop()
+              }}
+              onNewChat={onNewChat}
+              newChatDisabled={running}
+              footer={<p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>}
+            />
+          )}
         </ThreadPrimitive.Root>
       </TaskChipContext>
     </PanelShell>
@@ -422,7 +643,14 @@ function Message({ role }: { role: string }) {
 }
 
 function UserText({ text }: { text: string }) {
-  return <p className="rounded-lg bg-muted px-3 py-2 text-[0.8125rem] whitespace-pre-wrap text-foreground">{text}</p>
+  const mentions = useAuiState((s) => s.message.metadata?.custom?.mentions)
+  // plain text only: a mention is the user's own "@label" text, shown as a chip
+  const segments = useMemo(() => mentionSegments(text, readMentions(mentions)), [text, mentions])
+  return (
+    <p className="rounded-lg bg-muted px-3 py-2 text-[0.8125rem] whitespace-pre-wrap text-foreground">
+      {segments.map((segment, index) => (segment.mention ? <MentionChip key={index} kind={segment.mention} label={segment.text} className="mx-px" /> : <span key={index}>{segment.text}</span>))}
+    </p>
+  )
 }
 
 function AnswerText({ text }: { text: string }) {
@@ -497,6 +725,8 @@ function Step(props: ToolCallMessagePartProps) {
   const submit = useAgUiSubmitInterruptResponses()
   const result = parseToolResult(props.result)
   const outcome = stepOutcome({ approval: props.approval, result, isError: props.isError, status: props.status })
+  // an earlier chat is read-only: a call that still waits shows as a step, without Approve or Decline
+  const readOnly = useContext(ReadOnlyContext)
   // the server's interrupt says how risky the change is and whether "Allow in this chat" may be offered
   const interrupt = useAgUiInterrupts().find((entry) => entry.toolCallId === props.toolCallId)
   const view = describeStep(toolName, args, names, interrupt?.metadata?.risk)
@@ -504,7 +734,7 @@ function Step(props: ToolCallMessagePartProps) {
   const card = outcome === 'done' ? readCard(result, toolName) : null
   if (toolName === SUMMARY_TOOL) return card?.kind === 'summary' ? <SummaryCard card={card} /> : null
   const batch = toolName === BATCH_TOOL ? readBatch(interrupt?.metadata?.batch) : null
-  if (outcome === 'waiting' && batch && interrupt) {
+  if (outcome === 'waiting' && batch && interrupt && !readOnly) {
     return (
       <BatchApprovalCard
         items={batch}
@@ -513,7 +743,7 @@ function Step(props: ToolCallMessagePartProps) {
       />
     )
   }
-  if (outcome === 'waiting') {
+  if (outcome === 'waiting' && !readOnly) {
     return (
       <ApprovalCard
         view={view}

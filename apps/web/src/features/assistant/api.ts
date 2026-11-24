@@ -1,16 +1,36 @@
-// Ask AI's server API: the current conversation (kept server-side for a few hours), a new chat, Stop, and the
-// workspace's AI settings (bring your own Anthropic key). Runs themselves go over AG-UI (AssistantPanel.tsx).
+// Ask AI's server API: the current conversation, the member's history of earlier ones (kept server-side for 30 days,
+// for that member only), a new chat, Stop, and the workspace's AI settings (bring your own Anthropic key). Runs
+// themselves go over AG-UI (AssistantPanel.tsx).
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 export type AssistantSetup = 'ready' | 'no_key' | 'no_app_key'
 
 export type AssistantConversation = {
   id: string
+  /** The first message, cut short, or the member's own name for the chat; null before the first message. */
+  title: string | null
   /** AG-UI messages, with the waiting approval's interrupt in the assistant message's metadata. */
   messages: unknown[]
+  messageCount: number
+  /** The member's current conversation (the others are history; only the active one runs). */
+  active: boolean
+  createdAt: number
+  updatedAt: number
   expiresAt: number
   busy: boolean
 }
+
+/** A conversation as the history lists it. */
+export type ConversationSummary = {
+  id: string
+  title: string | null
+  messageCount: number
+  active: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type ConversationPage = { conversations: ConversationSummary[]; nextCursor: string | null }
 
 export type AssistantStatus = {
   conversation: AssistantConversation | null
@@ -93,6 +113,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const assistantKeys = {
   status: (workspaceId: string) => ['assistant', workspaceId, 'status'] as const,
   settings: (workspaceId: string) => ['assistant', workspaceId, 'settings'] as const,
+  history: (workspaceId: string) => ['assistant', workspaceId, 'history'] as const,
+  conversation: (workspaceId: string, id: string) => ['assistant', workspaceId, 'conversation', id] as const,
 }
 
 export function fetchAssistantStatus(workspaceId: string): Promise<AssistantStatus> {
@@ -101,6 +123,33 @@ export function fetchAssistantStatus(workspaceId: string): Promise<AssistantStat
 
 export function startConversation(workspaceId: string): Promise<{ conversation: AssistantConversation }> {
   return request(`${assistantBase(workspaceId)}/conversations`, { method: 'POST' })
+}
+
+function conversationPath(workspaceId: string, conversationId: string): string {
+  return `${assistantBase(workspaceId)}/conversations/${encodeURIComponent(conversationId)}`
+}
+
+/** One page of the member's conversations, newest use first; `before` is the previous page's `nextCursor`. */
+export function fetchConversations(workspaceId: string, before?: string | null): Promise<ConversationPage> {
+  const query = before ? `?before=${encodeURIComponent(before)}` : ''
+  return request(`${assistantBase(workspaceId)}/conversations${query}`)
+}
+
+export function openConversation(workspaceId: string, conversationId: string): Promise<{ conversation: AssistantConversation }> {
+  return request(conversationPath(workspaceId, conversationId))
+}
+
+export function renameConversation(workspaceId: string, conversationId: string, title: string): Promise<{ conversation: ConversationSummary }> {
+  return request(conversationPath(workspaceId, conversationId), { method: 'PATCH', body: JSON.stringify({ title }) })
+}
+
+export function deleteConversation(workspaceId: string, conversationId: string): Promise<void> {
+  return request(conversationPath(workspaceId, conversationId), { method: 'DELETE' })
+}
+
+/** Makes an earlier conversation the active one again; the one that was active is archived. */
+export function continueConversation(workspaceId: string, conversationId: string): Promise<{ conversation: AssistantConversation }> {
+  return request(`${conversationPath(workspaceId, conversationId)}/continue`, { method: 'POST' })
 }
 
 export function stopConversation(workspaceId: string, conversationId: string): Promise<void> {

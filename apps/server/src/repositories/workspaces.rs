@@ -1798,6 +1798,12 @@ impl WorkspaceRepository {
             .bind(expected_version as i64)
             .execute(&mut *transaction)
             .await?;
+        // Their Ask AI conversations are private to them: they go too, so a rejoin does not bring them back.
+        sqlx::query("DELETE FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2")
+            .bind(workspace_id.to_string())
+            .bind(target.user_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
         // A removed member's own credentials end here, so they do not work again if the person rejoins.
         // Service-account tokens belong to the workspace and stay.
         sqlx::query(

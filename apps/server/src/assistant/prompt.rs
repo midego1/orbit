@@ -120,6 +120,11 @@ pub(crate) fn page_context(path: &str) -> Option<String> {
         }
         ["tasks", id] if is_id(id) => format!("task {id} (get_task reads it)"),
         ["tasks-trash", ..] => "the task trash".to_owned(),
+        ["views", view] if is_id(view) => format!("the task view {view} (get_view reads it)"),
+        ["views", view, id] if is_id(view) && is_id(id) => {
+            format!("task {id} in view {view} (get_task reads it)")
+        }
+        ["activity"] => "their notifications".to_owned(),
         ["docs"] => "the docs".to_owned(),
         ["docs", "trash"] => "the docs trash".to_owned(),
         ["docs", id] if is_id(id) => format!("doc or database {id} (get_doc reads a doc)"),
@@ -203,6 +208,11 @@ mod tests {
         assert!(page_context("/docs/<script>").is_none());
         assert!(page_context("https://evil.test/tasks").is_none());
         assert!(page_context("/unknown/page").is_none());
+        assert_eq!(
+            page_context("/views/v1/ENG-2").as_deref(),
+            Some("The user has task ENG-2 in view v1 (get_task reads it) open (/views/v1/ENG-2).")
+        );
+        assert!(page_context("/views/v1/<x>").is_none());
     }
 
     #[test]

@@ -38,10 +38,10 @@ use crate::integration_routes::IntegrationState;
 use crate::linear::client::LinearClientConfig;
 use crate::linear::import::{LinearImportService, LinearImportSettings};
 use crate::linear_import_routes::LinearImportState;
+use crate::mail_certificate::{MailCertificates, RENEW_JOB as MAIL_CERTIFICATE_RENEW};
 use crate::mail_delivery::ProviderIntake;
 use crate::mail_dns::{DnsChecker, DnsLookup, HickoryDns};
 use crate::mail_intake::MailIntake;
-use crate::mail_certificate::{MailCertificates, RENEW_JOB as MAIL_CERTIFICATE_RENEW};
 use crate::mail_listener::{MailListener, MailListenerStatus, TRACE_HEADROOM};
 use crate::mail_routes::{MailSettings, MailState};
 use crate::mail_send::{run_send_job, send_job_outbound};
@@ -1331,8 +1331,13 @@ async fn initialize_production_services(
                     .map_err(|_| JobError::Retryable("retention maintenance failed".to_owned()))?;
                 crate::oauth::prune_clients(&database)
                     .await
+                    .map_err(|_| JobError::Retryable("OAuth client pruning failed".to_owned()))?;
+                // Ask AI conversations past their 30 days (docs/assistant.md); a busy database retries
+                crate::assistant::store::ConversationStore::new(database.clone())
+                    .purge_expired(TimestampMillis::now())
+                    .await
                     .map(|_| ())
-                    .map_err(|_| JobError::Retryable("OAuth client pruning failed".to_owned()))
+                    .map_err(|_| JobError::Retryable("Ask AI conversation purge failed".to_owned()))
             }
         })
         .and_then(|worker| {

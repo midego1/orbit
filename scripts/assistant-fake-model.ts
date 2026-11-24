@@ -16,7 +16,7 @@
 //   until Orbit's step limit stops the run (its summary card must still show); "plan the launch" (or "batch"):
 //   list_projects, list_task_statuses and list_tasks, then one propose_changes batch of eight changes (six new tasks,
 //   one with a Markdown description, and two updates of existing tasks), then an answer with what Orbit reported per
-//   change; anything else: an echo.
+//   change; a message with "@" mentions: the names Orbit resolved for them; anything else: an echo.
 
 const port = Number(process.argv[2] ?? 18_960)
 /** Optional pause before each answer (ms), so a recording looks like a real model at work. */
@@ -126,7 +126,12 @@ function plan(messages: Message[], name: string | undefined, content: string): R
 
 function answer(messages: Message[]): Response {
   const userTexts = messages.filter((m) => m.role === 'user').flatMap((m) => (typeof m.content === 'string' ? [m.content] : m.content.filter((b) => b.type === 'text').map((b) => b.text ?? '')))
-  const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('<mentions>') && !text.startsWith('(Automatic check')).pop() ?? ''
+  // the items the last message named with "@", as Orbit resolved them (one "- kind …" line each)
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user' && typeof m.content !== 'string' && m.content.some((b) => b.type === 'text'))
+  const mentioned = (typeof lastUser?.content === 'string' ? [] : (lastUser?.content ?? []))
+    .filter((b) => b.type === 'text' && b.text?.startsWith('<mentions>'))
+    .flatMap((b) => (b.text ?? '').split('\n').filter((line) => line.startsWith('- ')))
   // "…, then keep reading": after the change, read on until the step limit
   const keepReading = /,?\s*then keep reading\.?$/i.test(typed)
   const asked = typed.replace(/,?\s*then keep reading\.?$/i, '')
@@ -227,6 +232,7 @@ function answer(messages: Message[]): Response {
   if (showTask) return call('get_task', { task_id: showTask[1].toUpperCase() })
   if (/\btasks\b/i.test(asked)) return call('list_tasks', { limit: 100 }, 'Let me look up your tasks.')
   if (/projects/i.test(asked)) return call('list_projects', {})
+  if (mentioned.length) return say(`Orbit looked up what you mentioned:\n\n${mentioned.map((line) => `- ${line.slice(2).replace(/\s*\((\w+) id [^)]*\)$/, '')}`).join('\n')}`)
   return say(`You said: ${asked}`)
 }
 

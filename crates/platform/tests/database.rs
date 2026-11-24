@@ -3102,3 +3102,148 @@ async fn an_api_token_may_have_no_project_but_a_set_project_is_still_checked() {
         "existing rows keep their project"
     );
 }
+
+/// The Ask AI history migration: a member's one conversation becomes their active one, with a
+/// title and message count from what the panel showed, kept for 30 days from its last use; a
+/// conversation that had already expired stays gone. On both backends.
+#[tokio::test]
+async fn the_assistant_history_migration_keeps_the_current_conversation_active() {
+    const BEFORE: i64 = 20_261_123_090_656;
+    let directory = tempfile::tempdir().unwrap();
+    let postgres = match std::env::var("ORBIT_TEST_POSTGRES_URL") {
+        Ok(server) if !server.is_empty() => {
+            Some(configured_postgres_database(&server, &directory).await)
+        }
+        _ => None,
+    };
+    let config = postgres.as_ref().map_or_else(
+        || DatabaseConfig::new(directory.path().join("db.sqlite")),
+        |(_, _, config)| config.clone(),
+    );
+    let database = Database::open(&config).await.unwrap();
+    MigrationRunner::embedded_through("test", BEFORE)
+        .run(&database)
+        .await
+        .unwrap();
+    let now = orbit_platform::TimestampMillis::now().as_millis();
+    let hour = 60 * 60 * 1000;
+    let long = format!("Plan\nthe\tlaunch {}", "and more ".repeat(20));
+    let display = |text: &str| {
+        serde_json::json!({"display": [
+            {"id": "u1", "role": "user", "content": text},
+            {"id": "m1", "role": "assistant", "content": "", "toolCalls": [{"id": "t1"}]},
+            {"id": "tool-t1", "role": "tool", "toolCallId": "t1", "content": "{}"},
+            {"id": "m2", "role": "assistant", "content": "Done."},
+            {"id": "u2", "role": "user", "content": "Thanks"},
+        ]})
+        .to_string()
+    };
+    let mut transaction = database.transaction().await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at)
+         VALUES ('alice', 'alice@example.com', 'alice@example.com', 'Alice', 'x', 1, 1),
+                ('bob', 'bob@example.com', 'bob@example.com', 'Bob', 'x', 1, 1);
+         INSERT INTO workspaces (id, name, version, owner_membership_id, deleted_at, created_at, updated_at)
+         VALUES ('w1', 'One', 0, 'm1', NULL, 1, 1), ('w2', 'Two', 0, 'm2', NULL, 1, 1);
+         INSERT INTO memberships (id, workspace_id, user_id, role, version, created_at, updated_at)
+         VALUES ('m1', 'w1', 'alice', 'owner', 0, 1, 1), ('m2', 'w2', 'alice', 'owner', 0, 1, 1);",
+    )
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    for (id, workspace, user, state, updated_at, expires_at) in [
+        // Alice's conversation in w1 (alive), with a long first message
+        (
+            "c-alice-1",
+            "w1",
+            "alice",
+            display(&long),
+            now - hour,
+            now + 5 * hour,
+        ),
+        // Alice's in w2, alive
+        (
+            "c-alice-2",
+            "w2",
+            "alice",
+            display("  What is assigned to me?  "),
+            now - 2 * hour,
+            now + 4 * hour,
+        ),
+        // Bob's, already expired: it stays gone
+        (
+            "c-bob",
+            "w1",
+            "bob",
+            display("Old"),
+            now - 7 * hour,
+            now - hour,
+        ),
+        // a state that is no JSON: kept, without a title
+        (
+            "c-bad",
+            "w2",
+            "bob",
+            "not json".to_owned(),
+            now - hour,
+            now + 5 * hour,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO assistant_conversations (id, workspace_id, user_id, state_json, created_at, updated_at, \
+             expires_at) VALUES ($1, $2, $3, $4, $5, $5, $6)",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(user)
+        .bind(state)
+        .bind(updated_at)
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    }
+    transaction.commit().await.unwrap();
+
+    MigrationRunner::embedded("test")
+        .run(&database)
+        .await
+        .unwrap();
+
+    let rows: Vec<(String, Option<String>, i64, i64, i64)> = sqlx::query_as(
+        "SELECT id, title, message_count, active, expires_at - updated_at FROM assistant_conversations ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let days_30 = 30 * 24 * hour;
+    let mut expected_long: String = long.replace(['\n', '\t'], " ").chars().take(79).collect();
+    expected_long = format!("{}…", expected_long.trim_end());
+    assert_eq!(
+        rows,
+        [
+            ("c-alice-1".to_owned(), Some(expected_long), 4, 1, days_30),
+            (
+                "c-alice-2".to_owned(),
+                Some("What is assigned to me?".to_owned()),
+                4,
+                1,
+                days_30
+            ),
+            ("c-bad".to_owned(), None, 0, 1, days_30),
+        ]
+    );
+    // one active conversation per member and workspace
+    let second = sqlx::query(
+        "INSERT INTO assistant_conversations (id, workspace_id, user_id, state_json, created_at, updated_at, \
+         expires_at, active) VALUES ('c-dup', 'w1', 'alice', '{}', 1, 1, 1, 1)",
+    )
+    .execute(database.pool())
+    .await;
+    assert!(second.is_err());
+
+    drop(database);
+    if let Some((mut admin, name, _)) = postgres {
+        drop_database(&mut admin, &name).await;
+    }
+}
