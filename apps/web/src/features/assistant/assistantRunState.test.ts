@@ -104,11 +104,13 @@ test('the tab title gets the prefix while waiting and loses only the prefix afte
   expect(titleFor('Orbit', 'idle')).toBe('Orbit')
 })
 
-test('the edge pulses only while thinking, and never with reduced motion', () => {
+test('the light travels while thinking or changing, stops while waiting, and never moves with reduced motion', () => {
   expect(edgeMotion('idle', false)).toBe('none')
-  expect(edgeMotion('thinking', false)).toBe('pulse')
-  expect(edgeMotion('thinking', true)).toBe('steady')
-  expect(edgeMotion('changing', false)).toBe('steady')
+  expect(edgeMotion('idle', true)).toBe('none')
+  expect(edgeMotion('thinking', false)).toBe('orbit')
+  expect(edgeMotion('changing', false)).toBe('orbit')
   expect(edgeMotion('waiting', false)).toBe('steady')
+  expect(edgeMotion('thinking', true)).toBe('steady')
+  expect(edgeMotion('changing', true)).toBe('steady')
   expect(edgeMotion('waiting', true)).toBe('steady')
 })

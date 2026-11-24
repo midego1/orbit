@@ -22,11 +22,13 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   column at the right of the page (Widen makes it half the window); on a phone it is a sheet.
 - Each step shows what Ask AI does (reads, then changes). A change shows an approval card with its full arguments;
   technical values (versions, ids without a name) are folded under **Details**.
-- A thin edge around the window and the panel shows what Ask AI is doing, with an icon and a status line at the top
-  of the panel ("Reading your projects…", "Changing GEN-3…"): blue while it thinks or reads (a slow pulse, none with
-  reduced motion), amber while an approved change runs, violet while a change waits for your approval. While it
-  waits, the rest of the page dims a little but stays usable, and the tab title starts with "(Approval needed)". The
-  colours are the `--assistant-*` variables in `apps/web/src/index.css`.
+- The window edge and the panel show what Ask AI is doing, with an icon and a status line at the top of the panel
+  ("Reading your projects…", "Changing GEN-3…"). While it thinks or reads, a blue light travels around the window edge
+  and along the top of the status line, the icon moves and the text shimmers; while an approved change runs, the same
+  happens in amber, a little faster; the step that runs now has a soft pulsing ring. While a change waits for your
+  approval, everything stops: the edge is violet and steady, the rest of the page dims a little but stays usable, and
+  the tab title starts with "(Approval needed)". With reduced motion nothing moves; the colours stay. Colours, sizes
+  and timings are the `--assistant-*` block in `apps/web/src/index.css`.
 - Results show as cards, built by the server from the tool's own result (`apps/server/src/assistant/cards.rs`), never
   from the model's text: a task (key, title, status, priority, assignees, due date; the card links to the task), a
   task list (exact counts, rows grouped by project or status, five rows until **Show all**), docs and projects. An
