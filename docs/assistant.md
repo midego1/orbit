@@ -45,6 +45,24 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - **Follow along** (the eye button, on by default, saved per browser): the page goes to what Ask AI changed or
   opened. Off, the page stays and a "go there" link appears instead. The page never moves while you type in a field
   or have a dialog open.
+- **Suggestions:** an empty chat offers three or four prompts that fit the page in view (a task: "Summarize this
+  task", "What is blocking this?", "Draft next steps as sub-issues"; a task list: "Summarize open tasks", "What is
+  overdue?", "Plan this week"; a doc: "Summarize this doc", "Turn this into tasks"; other pages a general set). After
+  an answer a small row of them sits above the field. They come from the page's path only
+  (`apps/web/src/features/assistant/composer.ts`); a click sends the prompt, or fills the field when the prompt ends
+  open ("Create a task: ").
+- **Commands:** "/" at the start of the field opens a menu (↑/↓, Enter or Tab, Esc; the full prompt shows on hover):
+  `/summarize` (this page), `/plan` (this week), `/standup` (what changed since yesterday) write a plain prompt into
+  the field, which you can still edit; text after a typed command is added to it. `/new` starts a new chat. A command
+  is only text: it runs like any other message, with the same approvals. There is no `/model`: the model is the
+  workspace's setting (Settings → AI), not a member's choice per chat.
+- **Mentions:** "@" opens a picker of people, tasks, projects and docs (the app's own searches). A pick writes
+  `@ENG-12` (a task's key, otherwise the name) into the message and shows as a chip above the field. The message
+  sends only each mention's kind and id (context entry `mentions`, at most 10, only those still named in the text).
+  The server reads each one again through the same tools as the model, as the member
+  (`apps/server/src/assistant/mentions.rs`): an id they cannot see, or that does not exist, is dropped. The model
+  gets Orbit's own names and ids (`task ENG-12 "Fix login" (task id …)`), marked as untrusted data; a name the
+  client sent is never used. The sent message shows its mentions as chips, as plain text.
 - **Stop** ends the run at once; **New chat** starts over (the old conversation is deleted).
 - The mobile app has **Settings → AI** (key, Test, Save, model, daily limit, usage); the chat panel itself is on the
   web only for now.
