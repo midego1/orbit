@@ -337,7 +337,9 @@ fn setup_word(key: &KeyState) -> &'static str {
 /// The AG-UI messages of a conversation, with the approval card that waits, if any.
 fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value {
     let mut messages = conversation.state.display.clone();
-    if let Some(pending) = &conversation.state.pending
+    // only the active conversation can answer an approval: an archived one never shows its card
+    if conversation.active
+        && let Some(pending) = &conversation.state.pending
         && let Some(message) = messages
             .iter_mut()
             .rev()
@@ -920,6 +922,11 @@ async fn run(
     };
     if conversation.state.nonce.is_empty() {
         conversation.state.nonce = prompt::new_nonce();
+    }
+    // A chat left alone longer than the panel keeps it open (a tab left open) starts afresh, as a
+    // continued one does: what waited for approval expires and "Allow in this chat" ends.
+    if now.as_millis() - conversation.updated_at > store::IDLE_MS {
+        engine::retire(&mut conversation.state);
     }
     let workspace_name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
         .bind(member.workspace_id.to_string())

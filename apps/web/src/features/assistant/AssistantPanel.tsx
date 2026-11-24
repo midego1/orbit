@@ -3,7 +3,7 @@
 // a waiting change with its exact arguments; the approval card only answers approve or decline, so a reload shows the
 // same card. The history (clock button) lists earlier chats; one opens read-only from its stored messages and cards,
 // and Continue makes it the active chat again (its old approvals have expired on the server).
-import { useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { HttpAgent } from '@ag-ui/client'
@@ -39,6 +39,9 @@ import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
+
+/** True inside an earlier conversation shown read-only: no step there can answer an approval. */
+const ReadOnlyContext = createContext(false)
 
 type View = { kind: 'chat' } | { kind: 'history' } | { kind: 'earlier'; id: string }
 
@@ -203,6 +206,11 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
           onClose={onClose}
           onBack={() => setView({ kind: 'history' })}
           onContinue={() => continueChat(view.id)}
+          onActive={(open) => {
+            // the open chat, newer than this panel's copy: load it fresh
+            if (open.id !== conversation.id) void status.refetch()
+            setView({ kind: 'chat' })
+          }}
           error={switchError}
         />
       ) : null}
@@ -221,15 +229,24 @@ function BackButton({ onBack, label = 'Back to the chat' }: { onBack: () => void
 }
 
 /** An earlier conversation, read-only: its stored messages and the server's cards, as they were. */
-function EarlierConversation({ workspaceId, id, onClose, onBack, onContinue, error }: {
+function EarlierConversation({ workspaceId, id, onClose, onBack, onContinue, onActive, error }: {
   workspaceId: string
   id: string
   onClose: () => void
   onBack: () => void
   onContinue: () => Promise<void>
+  /** The server says this is the open chat after all (continued in another tab): show it live. */
+  onActive: (conversation: AssistantConversation) => void
   error: string | null
 }) {
   const opened = useQuery({ queryKey: assistantKeys.conversation(workspaceId, id), queryFn: () => openConversation(workspaceId, id), refetchOnWindowFocus: false, gcTime: 0 })
+  const active = opened.data?.conversation.active ? opened.data.conversation : null
+  useEffect(() => {
+    if (active) onActive(active)
+    // once per answer
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
+  if (active) return null
   if (opened.isPending || opened.isError) {
     return (
       <PanelShell onClose={onClose} title="History" leading={<BackButton onBack={onBack} label="Back to the history" />}>
@@ -299,15 +316,17 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   })
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread
-        onClose={onClose}
-        onNewChat={onNewChat}
-        onHistory={onHistory}
-        earlier={earlier ? { ...earlier, title: chatTitle(conversation) } : undefined}
-        runError={runError}
-        clearError={() => setRunError(null)}
-        onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
-      />
+      <ReadOnlyContext value={!!earlier}>
+        <Thread
+          onClose={onClose}
+          onNewChat={onNewChat}
+          onHistory={onHistory}
+          earlier={earlier ? { ...earlier, title: chatTitle(conversation) } : undefined}
+          runError={runError}
+          clearError={() => setRunError(null)}
+          onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
+        />
+      </ReadOnlyContext>
     </AssistantRuntimeProvider>
   )
 }
@@ -679,13 +698,15 @@ function Step(props: ToolCallMessagePartProps) {
   const names = useNames()
   const result = parseToolResult(props.result)
   const outcome = stepOutcome({ approval: props.approval, result, isError: props.isError, status: props.status })
+  // an earlier chat is read-only: a call that still waits shows as a step, without Approve or Decline
+  const readOnly = useContext(ReadOnlyContext)
   // the server's interrupt says how risky the change is and whether "Allow in this chat" may be offered
   const interrupt = useAgUiInterrupts().find((entry) => entry.toolCallId === props.toolCallId)
   const view = describeStep(toolName, args, names, interrupt?.metadata?.risk)
   // the server's card of this result (or the summary at the end of a message), never built from the model's text
   const card = outcome === 'done' ? readCard(result, toolName) : null
   if (toolName === SUMMARY_TOOL) return card?.kind === 'summary' ? <SummaryCard card={card} /> : null
-  if (outcome === 'waiting') {
+  if (outcome === 'waiting' && !readOnly) {
     return (
       <ApprovalCard
         view={view}

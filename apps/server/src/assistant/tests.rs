@@ -3622,3 +3622,346 @@ async fn over_http_only_the_member_can_use_their_history() {
     let (status, _) = http.json("GET", &one, &member, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---- review 1 ----
+
+#[tokio::test]
+async fn a_message_after_continuing_keeps_the_turns_alternating() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let first = store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let args = json!({"project_id": "p1", "status_id": "s1", "title": "X"});
+    let harness = Harness::new(vec![
+        tool("toolu_w", "create_task", &args),
+        text("Here is what I found."),
+    ])
+    .await;
+    let mut state = first.state.clone();
+    harness.run(&mut state, ask("create X")).await;
+    assert!(
+        store
+            .lease(&first, "r", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(store.save(&first, &state, "r", true, now).await.unwrap());
+    store
+        .create(w.workspace, w.owner, "m".into(), at(now, 1_000))
+        .await
+        .unwrap()
+        .unwrap();
+    let Switch::Done(resumed) = store
+        .resume(first.id, w.workspace, w.owner, at(now, 2_000))
+        .await
+        .unwrap()
+    else {
+        panic!("continue failed")
+    };
+    let mut state = resumed.state.clone();
+    let (outcome, _) = harness.run(&mut state, ask("what else?")).await;
+    assert_eq!(outcome, Outcome::Finished);
+    let request = harness.fake.requests().last().cloned().unwrap();
+    let roles: Vec<&str> = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "user"]);
+    // the expired call's result comes first in the user turn, then the new question
+    let last = request["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(last[0]["type"], "tool_result");
+    assert_eq!(last[0]["tool_use_id"], "toolu_w");
+    assert!(last.iter().any(|block| block["text"] == "what else?"));
+    assert!(harness.tools.names().is_empty());
+}
+
+#[tokio::test]
+async fn an_archived_conversation_loses_its_lease_and_no_late_save_lands() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let first = store
+        .create(w.workspace, w.owner, "n".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &first, "Hello", now).await;
+    // a run whose lease ran out (the server stopped) …
+    assert!(
+        store
+            .lease(&first, "late", now.as_millis() + 1_000, now)
+            .await
+            .unwrap()
+    );
+    // … and a new chat after that
+    store
+        .create(w.workspace, w.owner, "m".into(), at(now, 2_000))
+        .await
+        .unwrap()
+        .unwrap();
+    let (run_id, run_until): (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT run_id, run_until FROM assistant_conversations WHERE id = $1")
+            .bind(first.id.to_string())
+            .fetch_one(w.database.pool())
+            .await
+            .unwrap();
+    assert_eq!((run_id, run_until), (None, None));
+    let mut state = first.state.clone();
+    state.display.clear();
+    assert!(
+        !store
+            .save(&first, &state, "late", true, at(now, 3_000))
+            .await
+            .unwrap()
+    );
+    let kept = store
+        .get(first.id, w.workspace, w.owner, at(now, 3_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kept.state.display.len(),
+        2,
+        "the archived state is unchanged"
+    );
+}
+
+#[tokio::test]
+async fn two_first_chats_at_once_leave_one_active_conversation() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let (a, b) = tokio::join!(
+        store.create(w.workspace, w.owner, "a".into(), now),
+        store.create(w.workspace, w.owner, "b".into(), now),
+    );
+    assert!(a.unwrap().is_some());
+    assert!(b.unwrap().is_some());
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM assistant_conversations WHERE user_id = $1 AND active = 1",
+    )
+    .bind(w.owner.to_string())
+    .fetch_one(w.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+}
+
+#[tokio::test]
+async fn continuing_the_open_chat_also_starts_it_afresh() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let conversation = store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let harness = Harness::new(vec![tool(
+        "toolu_w",
+        "create_task",
+        &json!({"project_id": "p1", "status_id": "s1", "title": "X"}),
+    )])
+    .await;
+    let mut state = conversation.state.clone();
+    harness.run(&mut state, ask("create X")).await;
+    state.allowed_tools.insert("update_task".into());
+    assert!(
+        store
+            .lease(&conversation, "r", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .save(&conversation, &state, "r", true, now)
+            .await
+            .unwrap()
+    );
+    // the open chat shows its waiting card …
+    let open = store
+        .get(conversation.id, w.workspace, w.owner, now)
+        .await
+        .unwrap()
+        .unwrap();
+    let view = super::conversation_view(&open, now);
+    assert!(view.to_string().contains("interrupts"));
+    let Switch::Done(resumed) = store
+        .resume(conversation.id, w.workspace, w.owner, at(now, 1_000))
+        .await
+        .unwrap()
+    else {
+        panic!("continue failed")
+    };
+    assert!(resumed.active);
+    assert!(resumed.state.pending.is_none());
+    assert!(resumed.state.allowed_tools.is_empty());
+    assert!(
+        !super::conversation_view(&resumed, now)
+            .to_string()
+            .contains("interrupts")
+    );
+}
+
+#[tokio::test]
+async fn an_archived_conversation_never_shows_an_approval_card() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let conversation = store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let harness = Harness::new(vec![tool(
+        "toolu_w",
+        "create_task",
+        &json!({"project_id": "p1", "status_id": "s1", "title": "X"}),
+    )])
+    .await;
+    let mut state = conversation.state.clone();
+    harness.run(&mut state, ask("create X")).await;
+    assert!(
+        store
+            .lease(&conversation, "r", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .save(&conversation, &state, "r", true, now)
+            .await
+            .unwrap()
+    );
+    // an archived row that still holds an approval (only possible for rows the history migration
+    // archived as they were): its view has no card, and it cannot run
+    sqlx::query("UPDATE assistant_conversations SET active = 0 WHERE id = $1")
+        .bind(conversation.id.to_string())
+        .execute(w.database.pool())
+        .await
+        .unwrap();
+    let archived = store
+        .get(conversation.id, w.workspace, w.owner, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(archived.state.pending.is_some());
+    assert!(
+        !super::conversation_view(&archived, now)
+            .to_string()
+            .contains("interrupts")
+    );
+    assert!(
+        store
+            .get_active(conversation.id, w.workspace, w.owner, now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // continuing it retires the approval
+    let Switch::Done(resumed) = store
+        .resume(conversation.id, w.workspace, w.owner, now)
+        .await
+        .unwrap()
+    else {
+        panic!("continue failed")
+    };
+    assert!(resumed.state.pending.is_none());
+}
+
+#[tokio::test]
+async fn the_daily_purge_deletes_expired_conversations_of_every_workspace() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let old = store
+        .create(w.workspace, w.member, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &old, "Old", now).await;
+    let later = at(now, 20 * 24 * 60 * 60 * 1000);
+    let fresh = store
+        .create(w.workspace, w.owner, "b".into(), later)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &fresh, "Fresh", later).await;
+    let purge_at = at(now, super::store::CONVERSATION_TTL_MS + 1);
+    assert_eq!(store.purge_expired(purge_at).await.unwrap(), 1);
+    let left: Vec<String> = sqlx::query_scalar("SELECT id FROM assistant_conversations")
+        .fetch_all(w.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(left, [fresh.id.to_string()]);
+    assert_eq!(
+        store.purge_expired(purge_at).await.unwrap(),
+        0,
+        "safe to run again"
+    );
+}
+
+#[tokio::test]
+async fn a_member_removed_from_the_workspace_loses_their_conversations() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let conversation = store
+        .create(w.workspace, w.member, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &conversation, "Mine", now).await;
+    let owners = store
+        .create(w.workspace, w.owner, "b".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &owners, "The owner's", now).await;
+    let (membership, version): (String, i64) = sqlx::query_as(
+        "SELECT id, version FROM memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(w.workspace.to_string())
+    .bind(w.member.to_string())
+    .fetch_one(w.database.pool())
+    .await
+    .unwrap();
+    crate::repositories::workspaces::WorkspaceRepository::new((*w.database).clone())
+        .remove_member(
+            w.workspace,
+            membership.parse().unwrap(),
+            w.owner,
+            u64::try_from(version).unwrap(),
+            "test",
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .get(conversation.id, w.workspace, w.member, now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM assistant_conversations WHERE user_id = $1")
+            .bind(w.member.to_string())
+            .fetch_one(w.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        store
+            .get(owners.id, w.workspace, w.owner, now)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

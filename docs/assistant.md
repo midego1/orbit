@@ -52,10 +52,12 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   were (the server's stored data, never rebuilt from the model's text). **Continue this chat** makes it the open chat
   again; **Delete** (after a confirmation) removes it for good. After 6 hours without use, the panel opens with a
   new chat; the earlier one stays in the history.
-- Only the open chat can run. Switching away from a chat (New chat, or continuing another one) ends what waits in
-  it: a change that waited for your approval expires (it shows as "Expired, not done" and the model is told it was
-  not made), and every **Allow in this chat** of that chat is withdrawn. An old approval can never be applied later,
-  not even after you continue the chat.
+- Only the open chat can run, and only the open chat shows approval cards (an earlier chat opened from the history
+  is read-only: a step that waited shows without Approve or Decline). Switching away from a chat (New chat, or
+  continuing another one) ends what waits in it: a change that waited for your approval expires (it shows as
+  "Expired, not done" and the model is told it was not made), and every **Allow in this chat** of that chat is
+  withdrawn. **Continue this chat** and a chat left alone for more than 6 hours (a tab left open) start afresh in the
+  same way. An old approval can never be applied later.
 - The mobile app has **Settings → AI** (key, Test, Save, model, daily limit, usage); the chat panel itself is on the
   web only for now.
 
@@ -98,9 +100,10 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - When the limits cannot be checked (a database error), no request goes out.
 - Conversations are kept for 30 days after their last use (`CONVERSATION_TTL_MS` in `store.rs`), at most 100 per
   member and workspace (`MAX_CONVERSATIONS`; a new chat deletes the oldest beyond that), each up to the 2 MB a
-  conversation may hold (then it takes no new messages: start a new chat). Expired conversations are deleted when a
-  member of the workspace starts a new chat; a member who leaves the workspace can no longer open theirs, and they are
-  deleted with the user or the workspace.
+  conversation may hold (then it takes no new messages: start a new chat). Expired conversations are deleted by the
+  daily `workspace.retention` job (in batches of 200; also when a member of the workspace starts a new chat); until
+  then nothing shows or opens them. A member's conversations are deleted when they are removed from the workspace,
+  when they delete their account, and with the workspace.
 - A conversation is private to its member: nobody else can list, open, rename, continue or delete it, not even a
   workspace owner or admin: no admin page or workspace export includes them (instance backups hold them, like every
   table). The API answers another member's or another workspace's conversation with 404. Token usage per request (no content) is kept for the usage

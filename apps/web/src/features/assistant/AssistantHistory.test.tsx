@@ -180,3 +180,18 @@ test('titles fall back and the filter needs every word', () => {
   expect(filterConversations(rows, 'plan q4').map((row) => row.id)).toEqual(['a'])
   expect(filterConversations(rows, '  ').map((row) => row.id)).toEqual(['a', 'b'])
 })
+
+test('while older chats are not loaded, search says it covers the loaded ones only', async () => {
+  serve([
+    { conversations: [chat('c1', 'Newest', 1)], nextCursor: '123.c1' },
+    { conversations: [chat('c2', 'Oldest', 600)], nextCursor: null },
+  ])
+  const view = show()
+  await view.findByRole('list', { name: 'Earlier chats' })
+  expect(view.queryByText(/Search covers the chats loaded so far/)).toBeNull()
+  fireEvent.change(view.getByRole('searchbox', { name: 'Search chats' }), { target: { value: 'old' } })
+  expect(view.getByText('Search covers the chats loaded so far. Load older chats to search them too.')).toBeTruthy()
+  fireEvent.click(view.getByRole('button', { name: 'Load older chats' }))
+  expect(await view.findByText('Oldest')).toBeTruthy()
+  expect(view.queryByText(/Search covers the chats loaded so far/)).toBeNull()
+})

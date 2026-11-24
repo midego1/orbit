@@ -226,7 +226,12 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         content.push(Block::Text {
             text: text.to_owned(),
         });
-        state.transcript.push(Message::user(content));
+        // a user turn that is already last (the results of a stopped run, or of a chat switched away from) takes
+        // the message too, so user and assistant turns keep alternating
+        match state.transcript.last_mut() {
+            Some(last) if last.role == Role::User => last.content.extend(content),
+            _ => state.transcript.push(Message::user(content)),
+        }
         state
             .display
             .push(agui::user_message(&format!("user-{}", Id::new_v7()), text));

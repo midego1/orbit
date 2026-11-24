@@ -131,6 +131,9 @@ export function AssistantHistory({ workspaceId, onOpen, onDeleted }: {
             )}
           </ul>
         )}
+        {history.hasNextPage && filter.trim() ? (
+          <p className="px-2 pt-3 text-xs text-muted-foreground">Search covers the chats loaded so far. Load older chats to search them too.</p>
+        ) : null}
         {history.hasNextPage ? (
           <div className="flex justify-center pt-2">
             <Button variant="ghost" size="sm" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>

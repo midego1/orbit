@@ -24,6 +24,9 @@ pub(crate) const CONVERSATION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub(crate) const IDLE_MS: i64 = 6 * 60 * 60 * 1000;
 /// The most conversations kept per member and workspace; a new chat prunes the oldest.
 pub(crate) const MAX_CONVERSATIONS: i64 = 100;
+/// The daily purge deletes expired conversations this many at a time, for at most `PURGE_ROUNDS` batches a run.
+const PURGE_BATCH: i64 = 200;
+const PURGE_ROUNDS: usize = 50;
 /// A derived title is the first message cut to this many characters.
 pub(crate) const TITLE_CHARS: usize = 80;
 /// The longest title a member may give a conversation.
@@ -204,6 +207,17 @@ fn message_count(state: &ConversationState) -> i64 {
         .filter(|message| message["role"] == "user" || message["role"] == "assistant")
         .count();
     i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// The state as `engine::retire` leaves it, as JSON; `None` when retiring changes nothing.
+fn retired_json(state: &ConversationState) -> Result<Option<String>, sqlx::Error> {
+    let mut state = state.clone();
+    if !engine::retire(&mut state) {
+        return Ok(None);
+    }
+    serde_json::to_string(&state)
+        .map(Some)
+        .map_err(|error| sqlx::Error::Encode(Box::new(error)))
 }
 
 fn parse_id(row: &sqlx::any::AnyRow, column: &str) -> Result<Id, sqlx::Error> {
@@ -401,8 +415,9 @@ impl ConversationStore {
         nonce: String,
         now: TimestampMillis,
     ) -> Result<Switch, sqlx::Error> {
-        // A run may save the active conversation between the read and the transaction: then the
-        // version check fails and the switch starts over.
+        // The states are read and retired before the write transaction (they can be large); inside
+        // it, the versions read are checked again. A run that saved in between, or another switch
+        // (another tab), makes the check fail: the switch starts over.
         for _ in 0..3 {
             let active: Option<Conversation> = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
@@ -415,18 +430,21 @@ impl ConversationStore {
             .as_ref()
             .map(from_row)
             .transpose()?;
-            // the retired state is worked out before the write transaction (it can be large)
+            // what continuing starts from: the conversation retired as well (an approval that still
+            // waits in it, e.g. of the chat that is open, expires; "Allow in this chat" ends)
+            let resumed = match target {
+                Target::New => None,
+                Target::Existing(id) => {
+                    let Some(conversation) = self.get(id, workspace_id, user_id, now).await? else {
+                        return Ok(Switch::NotFound);
+                    };
+                    let json = retired_json(&conversation.state)?;
+                    Some((conversation, json))
+                }
+            };
             let retiring = match active {
                 Some(conversation) if target != Target::Existing(conversation.id) => {
-                    let mut state = conversation.state.clone();
-                    let json = if engine::retire(&mut state) {
-                        Some(
-                            serde_json::to_string(&state)
-                                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?,
-                        )
-                    } else {
-                        None
-                    };
+                    let json = retired_json(&conversation.state)?;
                     Some((conversation, json))
                 }
                 _ => None,
@@ -445,62 +463,78 @@ impl ConversationStore {
             if busy.is_some() {
                 return Ok(Switch::Busy);
             }
+            // the active conversation must still be the one read (none, or the same version)
+            let now_active: Option<(String, i64)> = sqlx::query_as(
+                "SELECT id, updated_at FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
+                 AND active = 1",
+            )
+            .bind(workspace_id.to_string())
+            .bind(user_id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let read_active = retiring
+                .as_ref()
+                .map(|(conversation, _)| conversation)
+                .or_else(|| {
+                    resumed
+                        .as_ref()
+                        .map(|(conversation, _)| conversation)
+                        .filter(|conversation| conversation.active)
+                })
+                .map(|conversation| (conversation.id.to_string(), conversation.updated_at));
+            if now_active != read_active {
+                drop(transaction);
+                continue;
+            }
             if let Some((conversation, json)) = &retiring {
-                let archived = if conversation.message_count == 0 {
-                    sqlx::query(
-                        "DELETE FROM assistant_conversations WHERE id = $1 AND active = 1 AND updated_at = $2",
-                    )
-                    .bind(conversation.id.to_string())
-                    .bind(conversation.updated_at)
-                    .execute(&mut *transaction)
-                    .await?
+                // archived: no run holds it any more, and none may (only the active one runs)
+                if conversation.message_count == 0 {
+                    sqlx::query("DELETE FROM assistant_conversations WHERE id = $1")
+                        .bind(conversation.id.to_string())
+                        .execute(&mut *transaction)
+                        .await?;
                 } else {
                     sqlx::query(
-                        "UPDATE assistant_conversations SET active = 0, state_json = COALESCE($1, state_json) \
-                         WHERE id = $2 AND active = 1 AND updated_at = $3",
+                        "UPDATE assistant_conversations SET active = 0, run_id = NULL, run_until = NULL, \
+                         state_json = COALESCE($1, state_json) WHERE id = $2",
                     )
                     .bind(json.clone())
                     .bind(conversation.id.to_string())
-                    .bind(conversation.updated_at)
                     .execute(&mut *transaction)
-                    .await?
-                }
-                .rows_affected();
-                if archived != 1 {
-                    // changed since it was read: roll back and read again
-                    drop(transaction);
-                    continue;
+                    .await?;
                 }
             }
-            let conversation = match target {
-                Target::New => {
+            let conversation = match resumed {
+                None => {
                     let conversation = self
                         .insert(&mut transaction, workspace_id, user_id, nonce.clone(), now)
                         .await?;
                     transaction.commit().await?;
                     conversation
                 }
-                Target::Existing(id) => {
-                    let resumed = sqlx::query(
-                        "UPDATE assistant_conversations SET active = 1, updated_at = $1, expires_at = $2 \
-                         WHERE id = $3 AND workspace_id = $4 AND user_id = $5 AND expires_at > $1",
+                Some((resumed, json)) => {
+                    let updated = sqlx::query(
+                        "UPDATE assistant_conversations SET active = 1, updated_at = $1, expires_at = $2, \
+                         run_id = NULL, run_until = NULL, state_json = COALESCE($3, state_json) \
+                         WHERE id = $4 AND updated_at = $5 AND expires_at > $1",
                     )
                     .bind(now.as_millis())
                     .bind(now.as_millis() + CONVERSATION_TTL_MS)
-                    .bind(id.to_string())
-                    .bind(workspace_id.to_string())
-                    .bind(user_id.to_string())
+                    .bind(json)
+                    .bind(resumed.id.to_string())
+                    .bind(resumed.updated_at)
                     .execute(&mut *transaction)
                     .await?
                     .rows_affected();
-                    if resumed != 1 {
-                        // nothing was archived either
-                        return Ok(Switch::NotFound);
+                    if updated != 1 {
+                        // changed (or deleted) since it was read
+                        drop(transaction);
+                        continue;
                     }
                     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
                         "SELECT {COLUMNS} FROM assistant_conversations WHERE id = $1"
                     )))
-                    .bind(id.to_string())
+                    .bind(resumed.id.to_string())
                     .fetch_one(&mut *transaction)
                     .await?;
                     transaction.commit().await?;
@@ -571,6 +605,58 @@ impl ConversationStore {
             created_at: now.as_millis(),
             updated_at: now.as_millis(),
         })
+    }
+
+    /// Deletes every conversation past its retention, of every workspace, in batches of
+    /// `PURGE_BATCH` (one short write transaction per workspace and batch). Run by the daily
+    /// `workspace.retention` job; safe to run again after a stop. Returns how many went.
+    pub(crate) async fn purge_expired(&self, now: TimestampMillis) -> Result<u64, sqlx::Error> {
+        let mut purged = 0;
+        for _ in 0..PURGE_ROUNDS {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT workspace_id, id FROM assistant_conversations WHERE expires_at <= $1 \
+                 ORDER BY expires_at LIMIT $2",
+            )
+            .bind(now.as_millis())
+            .bind(PURGE_BATCH)
+            .fetch_all(self.database.pool())
+            .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let mut by_workspace: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (workspace, id) in rows {
+                by_workspace.entry(workspace).or_default().push(id);
+            }
+            for (workspace, ids) in by_workspace {
+                let workspace_id: Id = workspace
+                    .parse()
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+                let mut transaction = self.database.workspace_transaction(workspace_id).await?;
+                let mut query =
+                    SqlBuilder::new("DELETE FROM assistant_conversations WHERE workspace_id = ");
+                query
+                    .push_bind(workspace)
+                    .push(" AND expires_at <= ")
+                    .push_bind(now.as_millis())
+                    .push(" AND id IN (");
+                {
+                    let mut list = query.separated(", ");
+                    for id in ids {
+                        list.push_bind(id);
+                    }
+                }
+                query.push(")");
+                purged += query
+                    .build()
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected();
+                transaction.commit().await?;
+            }
+        }
+        Ok(purged)
     }
 
     /// Gives one of the user's conversations a title of their own. `None` when there is no such
@@ -692,7 +778,7 @@ impl ConversationStore {
              run_id = CASE WHEN CAST($4 AS BIGINT) = 1 THEN NULL ELSE run_id END, \
              run_until = CASE WHEN CAST($4 AS BIGINT) = 1 THEN NULL ELSE run_until END, \
              title = COALESCE(title, $7), message_count = $8 \
-             WHERE id = $5 AND run_id = $6",
+             WHERE id = $5 AND run_id = $6 AND active = 1",
         )
         .bind(json)
         .bind(now.as_millis())

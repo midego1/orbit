@@ -38,6 +38,8 @@ WHERE CASE
 END;
 
 -- A member's newest conversation in a workspace (before this change they had at most one) becomes the active one.
+-- An older one (only left by a race of two "New chat"s) is archived as it is: if it still held an approval, the server
+-- never shows or applies it (only the active conversation shows approval cards and runs), and Continue retires it.
 UPDATE assistant_conversations
 SET active = 1
 WHERE NOT EXISTS (
