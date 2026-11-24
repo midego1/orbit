@@ -535,15 +535,43 @@ async fn undo_changes(
     let Ok(conversation_id) = conversation.parse::<Id>() else {
         return problem(StatusCode::NOT_FOUND, "not_found", "No such conversation.");
     };
+    match undo_for(
+        &state,
+        member.workspace_id,
+        member.user_id,
+        conversation_id,
+        &body.ids,
+    )
+    .await
+    {
+        Ok(results) => Json(json!({"results": results})).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// The undo of `ids` in the conversation, for the signed-in member `user_id` of `workspace_id`: only their own
+/// conversation (another user's is "not found"), never while a run holds it.
+pub(crate) async fn undo_for(
+    state: &AssistantState,
+    workspace_id: Id,
+    user_id: Id,
+    conversation_id: Id,
+    ids: &[String],
+) -> Result<Vec<Value>, Response> {
+    let member = UndoMember {
+        workspace_id,
+        user_id,
+    };
+    let body = UndoBody { ids: ids.to_vec() };
     if body.ids.is_empty()
         || body.ids.len() > undo::MAX_IDS
         || body.ids.iter().any(|id| id.is_empty() || id.len() > 64)
     {
-        return problem(
+        return Err(problem(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_ids",
             "Name between 1 and 50 changes to undo.",
-        );
+        ));
     }
     let now = TimestampMillis::now();
     // only the owner's own conversation, while it lives
@@ -553,8 +581,14 @@ async fn undo_changes(
         .await
     {
         Ok(Some(conversation)) => conversation,
-        Ok(None) => return problem(StatusCode::NOT_FOUND, "not_found", "No such conversation."),
-        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
+        Ok(None) => {
+            return Err(problem(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "No such conversation.",
+            ));
+        }
+        Err(_) => return Err(unavailable()),
     };
     // one writer at a time: never while a run holds the conversation
     let lease = format!("undo-{}", Id::new_v7());
@@ -565,13 +599,13 @@ async fn undo_changes(
     {
         Ok(true) => {}
         Ok(false) => {
-            return problem(
+            return Err(problem(
                 StatusCode::CONFLICT,
                 "busy",
                 "Ask AI is still working on this conversation; undo when it has finished.",
-            );
+            ));
         }
-        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
+        Err(_) => return Err(unavailable()),
     }
     // the state as the last run saved it
     let fresh = match state
@@ -582,7 +616,7 @@ async fn undo_changes(
         Ok(Some(fresh)) => fresh,
         _ => {
             let _ = state.store.release(&conversation, &lease).await;
-            return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.");
+            return Err(unavailable());
         }
     };
     let principal = match principal(
@@ -596,7 +630,7 @@ async fn undo_changes(
         Ok(principal) => principal,
         Err(()) => {
             let _ = state.store.release(&fresh, &lease).await;
-            return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.");
+            return Err(unavailable());
         }
     };
     let tools = SessionTools {
@@ -626,14 +660,30 @@ async fn undo_changes(
     {
         tracing::warn!(%error, "assistant conversation could not be saved after an undo");
     }
-    for result in &results {
-        let outcome = result["outcome"].as_str().unwrap_or("failed");
-        if matches!(outcome, "undone" | "conflict" | "failed") {
-            audit_undo(&state, member.workspace_id, member.user_id, fresh.id, outcome).await;
+    let mut results = results;
+    for result in &mut results {
+        // an audit row for each undo tried on a task (not for a refusal from its stored state)
+        if result
+            .as_object_mut()
+            .and_then(|fields| fields.remove("attempted"))
+            .is_some()
+        {
+            let outcome = result["outcome"].as_str().unwrap_or("failed");
+            audit_undo(state, member.workspace_id, member.user_id, fresh.id, outcome).await;
         }
     }
-    Json(json!({"results": results})).into_response()
+    Ok(results)
 }
+
+struct UndoMember {
+    workspace_id: Id,
+    user_id: Id,
+}
+
+fn unavailable() -> Response {
+    problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
+}
+
 
 async fn audit_undo(
     state: &AssistantState,

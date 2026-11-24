@@ -281,7 +281,7 @@ async fn undo_one<T: ToolRunner>(
 
 /// Undoes the records `ids` names (newest first, so "Undo all" can take back two changes to the same task), with the
 /// member's tools. Each record is set to `undoing` and saved before its effect, so it never runs twice. Returns one
-/// result per id: `{id, outcome, message}` with outcome `undone`, `conflict`, `expired`, `already_undone`,
+/// result per id: `{id, outcome, message}` (and `attempted` when the undo was tried on the task) with outcome `undone`, `conflict`, `expired`, `already_undone`,
 /// `not_found`, `uncertain` or `failed`.
 pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
     state: &mut ConversationState,
@@ -358,7 +358,7 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
                 } else {
                     format!("update of {} (its previous values are back)", name(&record))
                 });
-                results.push(json!({"id": id, "outcome": "undone", "message": if record.tool == "create_task" {
+                results.push(json!({"id": id, "outcome": "undone", "attempted": true, "message": if record.tool == "create_task" {
                     format!("{} was moved to the trash.", name(&record))
                 } else {
                     format!("{} has its previous values again.", name(&record))
@@ -366,11 +366,11 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
             }
             Err(Failure::Conflict(message)) => {
                 state.undo[position].state = UndoState::Conflict;
-                results.push(json!({"id": id, "outcome": "conflict", "message": message}));
+                results.push(json!({"id": id, "outcome": "conflict", "attempted": true, "message": message}));
             }
             Err(Failure::Retry(message)) => {
                 state.undo[position].state = UndoState::Available;
-                results.push(json!({"id": id, "outcome": "failed", "message": message}));
+                results.push(json!({"id": id, "outcome": "failed", "attempted": true, "message": message}));
             }
         }
     }
