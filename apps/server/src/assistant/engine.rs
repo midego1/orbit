@@ -242,7 +242,12 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         content.push(Block::Text {
             text: text.to_owned(),
         });
-        state.transcript.push(Message::user(content));
+        // a user turn that is already last (the results of a stopped run, or of a chat switched away from) takes
+        // the message too, so user and assistant turns keep alternating
+        match state.transcript.last_mut() {
+            Some(last) if last.role == Role::User => last.content.extend(content),
+            _ => state.transcript.push(Message::user(content)),
+        }
         let mut message = agui::user_message(&format!("user-{}", Id::new_v7()), text);
         let shown = mentions::display(mentioned);
         if shown.as_array().is_some_and(|list| !list.is_empty()) {
@@ -1050,6 +1055,40 @@ pub(crate) fn client_view(value: &Value) -> String {
         compact.insert("summary".into(), json!(format!("{} results", items.len())));
     }
     Value::Object(compact).to_string()
+}
+
+/// Closes a conversation the member switches away from (New chat, or continuing another one): the
+/// approval that waits expires for good (its call and the calls queued after it are answered as not
+/// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
+/// chat" is withdrawn, so continuing the conversation later asks again for each change. `true` when
+/// the state changed.
+pub(crate) fn retire(state: &mut ConversationState) -> bool {
+    let mut changed = !state.allowed_tools.is_empty();
+    state.allowed_tools.clear();
+    if let Some(pending) = state.pending.take() {
+        changed = true;
+        let mut content = pending.results;
+        content.push(Block::ToolResult {
+            tool_use_id: pending.tool_use_id.clone(),
+            content: EXPIRED.into(),
+            is_error: false,
+        });
+        for block in pending.queue {
+            if let Block::ToolUse { id, .. } = block {
+                content.push(Block::ToolResult {
+                    tool_use_id: id,
+                    content: NOT_RUN.into(),
+                    is_error: false,
+                });
+            }
+        }
+        state.transcript.push(Message::user(content));
+        state.display.push(agui::tool_message(
+            &pending.tool_use_id,
+            &json!({"expired": true}).to_string(),
+        ));
+    }
+    changed
 }
 
 /// Every `tool_use` of the last assistant message gets a result, so a stopped run never leaves

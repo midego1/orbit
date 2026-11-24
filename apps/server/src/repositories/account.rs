@@ -122,6 +122,11 @@ impl IdentityRepository {
         .bind(&id)
         .execute(&mut *transaction)
         .await?;
+        // The account stays (anonymized), so nothing cascades: its Ask AI conversations go here.
+        sqlx::query("DELETE FROM assistant_conversations WHERE user_id = $1")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
         crate::repositories::billing::remember_trial(self.database(), &mut transaction, user_id)
             .await?;
         let email = deleted_email(user_id);
