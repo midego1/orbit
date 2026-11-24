@@ -5820,7 +5820,7 @@ async fn an_earlier_chat_keeps_no_batch_to_approve_and_no_undo() {
             .is_none()
     );
     // no Undo there: refused, and the task stays
-    let refused = super::undo_for(&assistant, w.workspace, w.owner, first.id, &[id.clone()]).await;
+    let refused = super::undo_for(&assistant, w.workspace, w.owner, first.id, std::slice::from_ref(&id)).await;
     assert_eq!(
         refused.err().map(|response| response.status()),
         Some(StatusCode::CONFLICT)
