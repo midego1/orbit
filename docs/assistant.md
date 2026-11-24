@@ -48,7 +48,8 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - **Suggestions:** an empty chat offers three or four prompts that fit the page in view (a task: "Summarize this
   task", "What is blocking this?", "Draft next steps as sub-issues"; a task list: "Summarize open tasks", "What is
   overdue?", "Plan this week"; a doc: "Summarize this doc", "Turn this into tasks"; other pages a general set). After
-  an answer a small row of them sits above the field. They come from the page's path only
+  an answer a small row of them sits above the field. An earlier chat opened from the history shows no
+  suggestions and no field. They come from the page's path only
   (`apps/web/src/features/assistant/composer.ts`); a click sends the prompt, or fills the field when the prompt ends
   open ("Create a task: ").
 - **Commands:** "/" at the start of the field opens a menu (↑/↓, Enter or Tab, Esc; the full prompt shows on hover):
@@ -64,7 +65,19 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   gets Orbit's own names and ids (`task "ENG-12" "Fix login" (task id …)`), marked as untrusted data; a name the
   client sent is never used. The reads run together before the first model step; Stop ends them, and after 10
   seconds the message goes without its mentions. The sent message shows its mentions as chips, as plain text.
-- **Stop** ends the run at once; **New chat** starts over (the old conversation is deleted).
+- **Stop** ends the run at once; **New chat** starts over. The old conversation moves to the history.
+- **History** (the clock button in the panel header) lists your earlier chats in this workspace, newest first, with
+  their title and when you last used them. Search filters the titles; a chat's title is its first message (cut at
+  80 characters) until you rename it. Opening an earlier chat shows it read-only, with its steps and cards as they
+  were (the server's stored data, never rebuilt from the model's text). **Continue this chat** makes it the open chat
+  again; **Delete** (after a confirmation) removes it for good. After 6 hours without use, the panel opens with a
+  new chat; the earlier one stays in the history.
+- Only the open chat can run, and only the open chat shows approval cards (an earlier chat opened from the history
+  is read-only: a step that waited shows without Approve or Decline). Switching away from a chat (New chat, or
+  continuing another one) ends what waits in it: a change that waited for your approval expires (it shows as
+  "Expired, not done" and the model is told it was not made), and every **Allow in this chat** of that chat is
+  withdrawn. **Continue this chat** and a chat left alone for more than 6 hours (a tab left open) start afresh in the
+  same way. An old approval can never be applied later.
 - The mobile app has **Settings → AI** (key, Test, Save, model, daily limit, usage); the chat panel itself is on the
   web only for now.
 
@@ -105,8 +118,16 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
     not reported. The limit
     is approximate: the request that crosses it still finishes, so it can be passed by about one request per member.
 - When the limits cannot be checked (a database error), no request goes out.
-- Conversations are kept for 6 hours after their last use, for their member only. Token usage per request is kept
-  for the usage table in Settings → AI.
+- Conversations are kept for 30 days after their last use (`CONVERSATION_TTL_MS` in `store.rs`), at most 100 per
+  member and workspace (`MAX_CONVERSATIONS`; a new chat deletes the oldest beyond that), each up to the 2 MB a
+  conversation may hold (then it takes no new messages: start a new chat). Expired conversations are deleted by the
+  daily `workspace.retention` job (in batches of 200; also when a member of the workspace starts a new chat); until
+  then nothing shows or opens them. A member's conversations are deleted when they are removed from the workspace,
+  when they delete their account, and with the workspace.
+- A conversation is private to its member: nobody else can list, open, rename, continue or delete it, not even a
+  workspace owner or admin: no admin page or workspace export includes them (instance backups hold them, like every
+  table). The API answers another member's or another workspace's conversation with 404. Token usage per request (no content) is kept for the usage
+  table in Settings → AI, also after a conversation is deleted.
 
 ## Usage and cost
 

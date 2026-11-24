@@ -64,7 +64,8 @@ membership; send anything outside the workspace; act beyond your own access.
   upstream tool stays unavailable until someone decides.
 
 **Known limitations:** Anthropic only (the provider interface is ready for an OpenAI-compatible one, not built);
-conversations are kept 6 hours per member and are not visible to admins; the daily limit is on tokens, not money
+conversations (with a history per member) are kept 30 days, at most 100 per member and workspace, and are not
+visible to anyone else, admins included; the daily limit is on tokens, not money
 (set a spend limit in the Anthropic Console too); no chat panel in the mobile app yet. Details: [docs/assistant.md](docs/assistant.md).
 
 **Known upstream test failures.** `cargo test -p orbit-server --lib assistant` passes on SQLite and Postgres. Four
