@@ -45,7 +45,17 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - **Follow along** (the eye button, on by default, saved per browser): the page goes to what Ask AI changed or
   opened. Off, the page stays and a "go there" link appears instead. The page never moves while you type in a field
   or have a dialog open.
-- **Stop** ends the run at once; **New chat** starts over (the old conversation is deleted).
+- **Stop** ends the run at once; **New chat** starts over. The old conversation moves to the history.
+- **History** (the clock button in the panel header) lists your earlier chats in this workspace, newest first, with
+  their title and when you last used them. Search filters the titles; a chat's title is its first message (cut at
+  80 characters) until you rename it. Opening an earlier chat shows it read-only, with its steps and cards as they
+  were (the server's stored data, never rebuilt from the model's text). **Continue this chat** makes it the open chat
+  again; **Delete** (after a confirmation) removes it for good. After 6 hours without use, the panel opens with a
+  new chat; the earlier one stays in the history.
+- Only the open chat can run. Switching away from a chat (New chat, or continuing another one) ends what waits in
+  it: a change that waited for your approval expires (it shows as "Expired, not done" and the model is told it was
+  not made), and every **Allow in this chat** of that chat is withdrawn. An old approval can never be applied later,
+  not even after you continue the chat.
 - The mobile app has **Settings → AI** (key, Test, Save, model, daily limit, usage); the chat panel itself is on the
   web only for now.
 
@@ -86,8 +96,15 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
     not reported. The limit
     is approximate: the request that crosses it still finishes, so it can be passed by about one request per member.
 - When the limits cannot be checked (a database error), no request goes out.
-- Conversations are kept for 6 hours after their last use, for their member only. Token usage per request is kept
-  for the usage table in Settings → AI.
+- Conversations are kept for 30 days after their last use (`CONVERSATION_TTL_MS` in `store.rs`), at most 100 per
+  member and workspace (`MAX_CONVERSATIONS`; a new chat deletes the oldest beyond that), each up to the 2 MB a
+  conversation may hold (then it takes no new messages: start a new chat). Expired conversations are deleted when a
+  member of the workspace starts a new chat; a member who leaves the workspace can no longer open theirs, and they are
+  deleted with the user or the workspace.
+- A conversation is private to its member: nobody else can list, open, rename, continue or delete it, not even a
+  workspace owner or admin: no admin page or workspace export includes them (instance backups hold them, like every
+  table). The API answers another member's or another workspace's conversation with 404. Token usage per request (no content) is kept for the usage
+  table in Settings → AI, also after a conversation is deleted.
 
 ## Usage and cost
 

@@ -14,6 +14,8 @@ import { relativeTime } from '@/lib/format'
 import { assistantKeys, deleteConversation, fetchConversations, renameConversation, type ConversationPage, type ConversationSummary } from './api'
 import { chatTitle, filterConversations, UNTITLED } from './history'
 
+const ROW_ACTION = 'opacity-0 group-hover/row:opacity-100 group-focus-within/row:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100'
+
 type Pages = InfiniteData<ConversationPage, string | null>
 
 export function AssistantHistory({ workspaceId, onOpen, onDeleted }: {
@@ -182,13 +184,14 @@ function HistoryRow({ conversation, onOpen, onRename, onDelete }: {
           <time dateTime={updated}>{relativeTime(updated)}</time>
         </span>
       </button>
+      {/* on a desktop the actions show on hover or keyboard focus; on touch screens always */}
       <Tip label="Rename">
-        <Button variant="ghost" size="icon-xs" aria-label={`Rename “${title}”`} className="text-muted-foreground" onClick={onRename}>
+        <Button variant="ghost" size="icon-xs" aria-label={`Rename “${title}”`} className={cn('text-muted-foreground', ROW_ACTION)} onClick={onRename}>
           <Edit />
         </Button>
       </Tip>
       <Tip label="Delete">
-        <Button variant="ghost" size="icon-xs" aria-label={`Delete “${title}”`} className="text-muted-foreground hover:text-destructive" onClick={onDelete}>
+        <Button variant="ghost" size="icon-xs" aria-label={`Delete “${title}”`} className={cn('text-muted-foreground hover:text-destructive', ROW_ACTION)} onClick={onDelete}>
           <Trash />
         </Button>
       </Tip>

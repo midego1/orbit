@@ -20,6 +20,7 @@ import {
 import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime } from '@assistant-ui/react-ag-ui'
 import { ArrowLeft, ArrowUp, ArrowUpRight, Clock, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
 import { cn } from 'cn'
+import { InfoTip } from '@/components/common/InfoTip'
 import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
@@ -505,7 +506,10 @@ function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, 
                 </p>
               ) : null}
               <div className="flex items-center gap-2">
-                <p className="min-w-0 flex-1 text-xs text-muted-foreground">An earlier chat. Continue it to ask more; changes it asked for and you did not approve have expired.</p>
+                <p className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted-foreground">
+                  An earlier chat
+                  <InfoTip text="Read-only. Continue it to ask more. A change it asked for that you did not approve has expired: Ask AI asks again." />
+                </p>
                 <Button
                   size="sm"
                   disabled={continuing}
@@ -534,54 +538,55 @@ function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, 
               Ask AI wants to show you a page: go there
             </button>
           ) : null}
-          <form
-            hidden={!!earlier}
-            className="shrink-0 px-3 pb-3"
-            onSubmit={(event: FormEvent) => {
-              event.preventDefault()
-              send()
-            }}
-          >
-            <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
-              <label htmlFor="ask-ai-input" className="sr-only">
-                Message Ask AI
-              </label>
-              <textarea
-                id="ask-ai-input"
-                ref={input}
-                rows={1}
-                value={draft}
-                disabled={waiting}
-                placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
-                className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={onKeyDown}
-              />
-              {running ? (
-                <Tip label="Stop">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="icon-sm"
-                    aria-label="Stop"
-                    onClick={() => {
-                      aui.thread().cancelRun()
-                      onStop()
-                    }}
-                  >
-                    <Stop />
-                  </Button>
-                </Tip>
-              ) : (
-                <Tip label="Send">
-                  <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
-                    <ArrowUp />
-                  </Button>
-                </Tip>
-              )}
-            </div>
-            <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
-          </form>
+          {earlier ? null : (
+            <form
+              className="shrink-0 px-3 pb-3"
+              onSubmit={(event: FormEvent) => {
+                event.preventDefault()
+                send()
+              }}
+            >
+              <div className="flex items-end gap-1.5 rounded-lg border border-input bg-background py-1 pr-1 pl-3 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
+                <label htmlFor="ask-ai-input" className="sr-only">
+                  Message Ask AI
+                </label>
+                <textarea
+                  id="ask-ai-input"
+                  ref={input}
+                  rows={1}
+                  value={draft}
+                  disabled={waiting}
+                  placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or tell Ask AI what to do…'}
+                  className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={onKeyDown}
+                />
+                {running ? (
+                  <Tip label="Stop">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="icon-sm"
+                      aria-label="Stop"
+                      onClick={() => {
+                        aui.thread().cancelRun()
+                        onStop()
+                      }}
+                    >
+                      <Stop />
+                    </Button>
+                  </Tip>
+                ) : (
+                  <Tip label="Send">
+                    <Button type="submit" size="icon-sm" aria-label="Send" disabled={!draft.trim() || waiting || loading}>
+                      <ArrowUp />
+                    </Button>
+                  </Tip>
+                )}
+              </div>
+              <p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>
+            </form>
+          )}
         </ThreadPrimitive.Root>
       </TaskChipContext>
     </PanelShell>
