@@ -295,9 +295,13 @@ function given(value: unknown): boolean {
  * when it has a preview that does not show every argument (a parent, a recurrence, …). Nothing the change writes may
  * be approved unseen behind a fold.
  */
+/** Ids that only say where a change goes, never what it does. */
+const ID_BOOKKEEPING: readonly string[] = ['workspace_id']
+
 export function detailsOpen(tool: string, args: Record<string, unknown>, hasPreview: boolean): boolean {
   if (Object.entries(args).some(([key, value]) => RICH_TEXT_ARGS.includes(key) && given(value))) return true
-  if (!hasPreview) return false
+  // without a preview, ids the user would not recognise (a parent, a task to link) go under Details: open it
+  if (!hasPreview) return Object.entries(args).some(([key, value]) => /_ids?$/.test(key) && !ID_BOOKKEEPING.includes(key) && given(value))
   const shown = PREVIEW_SHOWS[tool] ?? []
   // a cleared value (`null`, `[]` for labels) is a change too; only an empty text is nothing
   return Object.entries(args).some(([key, value]) => value !== undefined && value !== '' && !shown.includes(key))

@@ -4761,6 +4761,10 @@ struct VersionedTasks {
     trash: Mutex<std::collections::HashMap<String, Value>>,
     /// A sub-issue appears right after the check, before the delete (the race the recheck closes).
     sub_issue_sneaks_in: bool,
+    /// The trash cannot be read after the delete.
+    trash_unreadable: bool,
+    /// Restoring from the trash fails.
+    restore_fails: bool,
 }
 
 impl ToolRunner for VersionedTasks {
@@ -4772,6 +4776,9 @@ impl ToolRunner for VersionedTasks {
                 .push((name.to_owned(), input.clone()));
             let mut tasks = self.tasks.lock().unwrap();
             let id = input["task_id"].as_str().unwrap_or_default().to_owned();
+            if name == "restore_task" && self.restore_fails {
+                return Err("Task service is unavailable".into());
+            }
             if name == "restore_task" {
                 let mut trashed = self
                     .trash
@@ -4822,6 +4829,7 @@ impl ToolRunner for VersionedTasks {
                     .cloned()
                     .ok_or_else(|| "Task resource is not available".into()),
                 "list_tasks" => Ok(json!({"items": []})),
+                "list_task_trash" if self.trash_unreadable => Err("Service is unavailable".into()),
                 "list_task_trash" => Ok(json!({
                     "items": self.trash.lock().unwrap().values().cloned().collect::<Vec<_>>(),
                     "next_cursor": null,
@@ -5846,4 +5854,117 @@ async fn an_earlier_chat_keeps_no_batch_to_approve_and_no_undo() {
     super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), false);
     assert!(!messages[0]["content"].as_str().unwrap().contains("undo"));
     super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), true);
+}
+
+#[tokio::test]
+async fn an_undo_of_a_create_whose_trash_cannot_be_checked_or_restored_is_never_reported_as_clean()
+{
+    use super::undo::undo;
+    for (unreadable, restore_fails, says) in [
+        (
+            true,
+            false,
+            "could not check whether sub-issues went with it",
+        ),
+        (false, true, "could not put it back"),
+    ] {
+        let tools = VersionedTasks {
+            sub_issue_sneaks_in: true,
+            trash_unreadable: unreadable,
+            restore_fails,
+            ..VersionedTasks::default()
+        };
+        tools
+            .tasks
+            .lock()
+            .unwrap()
+            .insert("t1".into(), json!({"id": "t1", "version": 1}));
+        let mut state = state_with(vec![record(
+            "u-create",
+            "create_task",
+            "t1",
+            None,
+            1,
+            Value::Null,
+        )]);
+        let saves = Saves {
+            ok: true,
+            count: Mutex::new(0),
+        };
+        let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+        assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+        let message = results[0]["message"].as_str().unwrap();
+        assert!(message.contains(says), "{message}");
+        assert!(message.contains("trash"), "{message}");
+        assert_eq!(state.undo[0].state, super::store::UndoState::Conflict);
+    }
+}
+
+#[tokio::test]
+async fn retiring_a_chat_audits_each_dropped_change_as_declined() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let first = store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let harness = Harness::new(vec![tool(
+        "toolu_b",
+        "propose_changes",
+        &creates(&["One", "Two", "Three"]),
+    )])
+    .await;
+    let mut state = first.state.clone();
+    assert_eq!(
+        harness.run(&mut state, ask("three")).await.0,
+        Outcome::Paused
+    );
+    assert_eq!(
+        super::engine::pending_changes(&state),
+        ["create_task", "create_task", "create_task"]
+    );
+    assert!(
+        store
+            .lease(&first, "run", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(store.save(&first, &state, "run", true, now).await.unwrap());
+    // a new chat retires the first one with its batch
+    store
+        .create(
+            w.workspace,
+            w.owner,
+            "n0nce2".into(),
+            TimestampMillis::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT metadata_json FROM audit_events WHERE action = 'assistant.change' AND resource_id = $1",
+    )
+    .bind(first.id.to_string())
+    .fetch_all(w.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        let metadata: Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(metadata["outcome"], "declined");
+        assert_eq!(metadata["reason"], "chat_retired");
+        assert_eq!(metadata["tool"], "create_task");
+    }
+    // a single waiting change counts once
+    let mut single = super::tests::state();
+    let one = Harness::new(vec![tool(
+        "toolu_w",
+        "create_task",
+        &json!({"project_id": "p1", "status_id": "s1", "title": "X"}),
+    )])
+    .await;
+    one.run(&mut single, ask("x")).await;
+    assert_eq!(super::engine::pending_changes(&single), ["create_task"]);
 }

@@ -163,3 +163,14 @@ test('an answer that did not go through lets the batch be answered again', async
   expect(calls).toBe(1)
   expect(approve(view as never).disabled).toBe(false)
 })
+
+test('a change without a preview opens its Details when it names something by id', () => {
+  const view = show()
+  // c8: an update without a preview; which task it changes is an id, shown under Details
+  expect((view.container.querySelector('[data-batch-item="c8"] details') as HTMLDetailsElement).open).toBe(true)
+  expect(detailsOpen('create_task_relation', { task_id: 't', other_task_id: 'o', type: 'blocks' }, false)).toBe(true)
+  expect(detailsOpen('update_label', { label_ids: ['l1'] }, false)).toBe(true)
+  // a name alone, or only the workspace: nothing hidden that matters
+  expect(detailsOpen('update_project', { name: 'Launch' }, false)).toBe(false)
+  expect(detailsOpen('create_project', { workspace_id: 'w', name: 'Launch' }, false)).toBe(false)
+})

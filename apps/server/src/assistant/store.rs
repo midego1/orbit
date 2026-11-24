@@ -270,6 +270,31 @@ fn message_count(state: &ConversationState) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
+/// An `assistant.change` audit row (declined) for each change a retired chat's approval dropped unanswered.
+pub(crate) async fn audit_dropped(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    conversation: &Conversation,
+    tools: &[String],
+    now: TimestampMillis,
+) -> Result<(), sqlx::Error> {
+    for tool in tools {
+        crate::audit::record(
+            transaction,
+            conversation.workspace_id,
+            Some(conversation.user_id),
+            "assistant.change",
+            crate::audit::AuditOutcome::Success,
+            "assistant_conversation",
+            Some(conversation.id),
+            super::REQUEST_ID,
+            serde_json::json!({"tool": tool, "outcome": "declined", "reason": "chat_retired", "via": "assistant"}),
+            now,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// The state as `engine::retire` leaves it, as JSON; `None` when retiring changes nothing.
 fn retired_json(state: &ConversationState) -> Result<Option<String>, sqlx::Error> {
     let mut state = state.clone();
@@ -546,6 +571,18 @@ impl ConversationStore {
             if now_active != read_active {
                 drop(transaction);
                 continue;
+            }
+            // what the retired chats' approvals dropped unanswered counts as declined
+            for (conversation, json) in retiring.iter().chain(resumed.iter()) {
+                if json.is_some() {
+                    audit_dropped(
+                        &mut transaction,
+                        conversation,
+                        &engine::pending_changes(&conversation.state),
+                        now,
+                    )
+                    .await?;
+                }
             }
             if let Some((conversation, json)) = &retiring {
                 // archived: no run holds it any more, and none may (only the active one runs)

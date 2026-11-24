@@ -1258,7 +1258,22 @@ async fn run(
     // A chat left alone longer than the panel keeps it open (a tab left open) starts afresh, as a
     // continued one does: what waited for approval expires and "Allow in this chat" ends.
     if now.as_millis() - conversation.updated_at > store::IDLE_MS {
+        let dropped = engine::pending_changes(&conversation.state);
         engine::retire(&mut conversation.state);
+        if !dropped.is_empty() {
+            let audited = async {
+                let mut transaction = state
+                    .database
+                    .workspace_transaction(conversation.workspace_id)
+                    .await?;
+                store::audit_dropped(&mut transaction, &conversation, &dropped, now).await?;
+                transaction.commit().await
+            }
+            .await;
+            if let Err(error) = audited {
+                tracing::warn!(%error, "assistant audit rows could not be written");
+            }
+        }
     }
     let workspace_name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
         .bind(member.workspace_id.to_string())

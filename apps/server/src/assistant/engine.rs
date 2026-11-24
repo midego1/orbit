@@ -1482,6 +1482,18 @@ pub(crate) fn client_view(value: &Value) -> String {
 /// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
 /// chat" is withdrawn, so continuing the conversation later asks again for each change. `true` when
 /// the state changed.
+/// The changes a waiting approval holds (each item of a batch, or the single change): what retiring the chat drops
+/// unanswered, audited as declined.
+pub(crate) fn pending_changes(state: &ConversationState) -> Vec<String> {
+    match &state.pending {
+        Some(Pending {
+            batch: Some(items), ..
+        }) => items.iter().map(|item| item.tool.clone()).collect(),
+        Some(pending) => vec![pending.name.clone()],
+        None => Vec::new(),
+    }
+}
+
 pub(crate) fn retire(state: &mut ConversationState) -> bool {
     let mut changed = !state.allowed_tools.is_empty();
     state.allowed_tools.clear();
