@@ -25,7 +25,7 @@ use super::engine::{Engine, Input, Limits, Outcome, RunHooks, ToolRunner};
 use super::model::{Block, Role, Usage};
 use super::registry::Registry;
 use super::settings::{self, SettingsError, SettingsRepository};
-use super::store::{ConversationState, ConversationStore, Deleted, Pending, Switch};
+use super::store::{ConversationState, ConversationStore, Deleted, Switch};
 
 // ---- the fake model server ----
 
@@ -2992,7 +2992,7 @@ async fn the_history_lists_opens_renames_continues_and_deletes_conversations() {
             .delete(second.id, w.workspace, w.owner, at(now, 5_000))
             .await
             .unwrap(),
-        Deleted::Deleted
+        Deleted::Done
     );
     assert!(
         store
@@ -3043,7 +3043,7 @@ async fn the_history_lists_opens_renames_continues_and_deletes_conversations() {
             .delete(first.id, w.workspace, w.owner, at(now, 6_000))
             .await
             .unwrap(),
-        Deleted::Deleted
+        Deleted::Done
     );
     assert!(
         store
@@ -3391,4 +3391,234 @@ async fn an_approval_of_a_chat_switched_away_from_can_never_be_applied() {
             .any(|event| event["code"] == "no_pending_approval")
     );
     assert!(harness.tools.names().is_empty(), "the change never ran");
+}
+
+// ---- the history over HTTP: only the member's own conversations ----
+
+struct Http {
+    app: Router,
+}
+
+impl Http {
+    fn new(w: &Workspace) -> Self {
+        use crate::auth_routes::CookieMode;
+        use crate::repositories::identity::IdentityRepository;
+        use crate::repositories::tasks::TaskRepository;
+        let identity = Arc::new(IdentityRepository::new((*w.database).clone()));
+        let tools = crate::mcp::TaskTools::in_process(
+            crate::token_api::TokenApi::new(Arc::new(TaskRepository::new((*w.database).clone()))),
+            super::REQUEST_ID,
+        );
+        let state = super::AssistantState::new(
+            identity,
+            CookieMode::secure(),
+            tools,
+            None,
+            orbit_platform::EnvironmentMode::Production,
+        );
+        Self {
+            app: super::router(state),
+        }
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("origin", "https://orbit.test")
+            .header("cookie", cookie);
+        let request = match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string())),
+            None => request.body(Body::empty()),
+        }
+        .unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn json(
+        &self,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let (status, text) = self.send(method, uri, cookie, body).await;
+        (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+}
+
+async fn cookie_for(w: &Workspace, user: Id, email: &str) -> String {
+    let identity = crate::repositories::identity::IdentityRepository::new((*w.database).clone());
+    let session = identity
+        .create_session(
+            &orbit_platform::AuthenticatedUser {
+                id: user,
+                email: email.to_owned(),
+                display_name: "Someone".to_owned(),
+            },
+            TimestampMillis::now(),
+        )
+        .await
+        .unwrap();
+    format!("__Host-orbit_session={}", session.token)
+}
+
+#[tokio::test]
+async fn over_http_only_the_member_can_use_their_history() {
+    let w = workspace().await;
+    let http = Http::new(&w);
+    let store = ConversationStore::new((*w.database).clone());
+    let member = cookie_for(&w, w.member, "member@example.com").await;
+    let owner = cookie_for(&w, w.owner, "owner@example.com").await;
+    let base = format!("/api/v1/assistant/workspaces/{}", w.workspace);
+
+    // the member's chat, with a message
+    let (status, created) = http
+        .json("POST", &format!("{base}/conversations"), &member, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let id: Id = created["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let conversation = store
+        .get(id, w.workspace, w.member, TimestampMillis::now())
+        .await
+        .unwrap()
+        .unwrap();
+    talk(
+        &store,
+        &conversation,
+        "My private question",
+        TimestampMillis::now(),
+    )
+    .await;
+    let one = format!("{base}/conversations/{id}");
+
+    let (status, list) = http
+        .json("GET", &format!("{base}/conversations"), &member, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["conversations"][0]["id"], id.to_string());
+    assert_eq!(list["conversations"][0]["title"], "My private question");
+    assert_eq!(list["conversations"][0]["active"], true);
+    assert_eq!(list["nextCursor"], Value::Null);
+    let (status, opened) = http.json("GET", &one, &member, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        opened["conversation"]["messages"][0]["content"],
+        "My private question"
+    );
+
+    // the workspace owner (an admin) cannot see, open, rename, continue or delete it
+    let (status, list) = http
+        .json("GET", &format!("{base}/conversations"), &owner, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["conversations"], json!([]));
+    for (method, uri, body) in [
+        ("GET", one.clone(), None),
+        ("PATCH", one.clone(), Some(json!({"title": "Mine now"}))),
+        ("DELETE", one.clone(), None),
+        ("POST", format!("{one}/continue"), None),
+    ] {
+        let (status, _) = http.json(method, &uri, &owner, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+    // nor through another workspace of theirs
+    let other = crate::repositories::workspaces::WorkspaceRepository::new((*w.database).clone())
+        .create(w.owner, "Other".into(), "test", TimestampMillis::now())
+        .await
+        .unwrap();
+    let elsewhere = format!(
+        "/api/v1/assistant/workspaces/{}/conversations/{id}",
+        other.id
+    );
+    let (status, _) = http.json("GET", &elsewhere, &owner, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // the member is no member of that workspace: 404, like every workspace route
+    let (status, _) = http
+        .json(
+            "GET",
+            &format!("/api/v1/assistant/workspaces/{}/conversations", other.id),
+            &member,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // without a session: 401
+    let (status, _) = http
+        .json("GET", &format!("{base}/conversations"), "", None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // rename: trimmed; empty or too long is refused
+    let (status, renamed) = http
+        .json(
+            "PATCH",
+            &one,
+            &member,
+            Some(json!({"title": "  Q4   plan "})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["conversation"]["title"], "Q4 plan");
+    for title in [json!(""), json!("x".repeat(121))] {
+        let (status, _) = http
+            .json("PATCH", &one, &member, Some(json!({"title": title})))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // a new chat archives it; a run on the archived one is refused (continue it first)
+    let (status, _) = http
+        .json("POST", &format!("{base}/conversations"), &member, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, sse) = http
+        .send(
+            "POST",
+            &format!("{base}/run"),
+            &member,
+            Some(json!({"threadId": id.to_string(), "runId": "r1", "messages": [{"id": "m", "role": "user", "content": "hi"}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sse.contains("conversation_gone"), "{sse}");
+    let (status, resumed) = http
+        .json("POST", &format!("{one}/continue"), &member, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resumed["conversation"]["active"], true);
+    assert_eq!(resumed["conversation"]["title"], "Q4 plan");
+
+    // a bad cursor is refused; delete is for good
+    let (status, _) = http
+        .json(
+            "GET",
+            &format!("{base}/conversations?before=nonsense"),
+            &member,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = http.send("DELETE", &one, &member, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = http.json("GET", &one, &member, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

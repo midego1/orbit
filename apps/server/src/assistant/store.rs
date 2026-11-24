@@ -141,7 +141,7 @@ pub(crate) enum Switch {
 /// What a delete did.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Deleted {
-    Deleted,
+    Done,
     Busy,
     NotFound,
 }
@@ -638,7 +638,7 @@ impl ConversationStore {
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        Ok(Deleted::Deleted)
+        Ok(Deleted::Done)
     }
 
     /// Takes the conversation for one run until `until`; `false` when another run holds it or it is

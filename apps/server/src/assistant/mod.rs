@@ -454,8 +454,8 @@ async fn list_conversations(
     .into_response()
 }
 
-fn conversation_id(raw: &str) -> Result<Id, Response> {
-    raw.parse::<Id>().map_err(|_| no_conversation())
+fn conversation_id(raw: &str) -> Option<Id> {
+    raw.parse::<Id>().ok()
 }
 
 /// One of the member's conversations with its messages, as the panel showed them.
@@ -468,9 +468,8 @@ async fn open_conversation(
         Ok(member) => member,
         Err(response) => return response,
     };
-    let id = match conversation_id(&conversation) {
-        Ok(id) => id,
-        Err(response) => return response,
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
     };
     let now = TimestampMillis::now();
     match state
@@ -501,9 +500,8 @@ async fn rename_conversation(
         Ok(member) => member,
         Err(response) => return response,
     };
-    let id = match conversation_id(&conversation) {
-        Ok(id) => id,
-        Err(response) => return response,
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
     };
     let Some(title) = store::clean_title(&input.title) else {
         return problem(
@@ -538,9 +536,8 @@ async fn delete_conversation(
         Ok(member) => member,
         Err(response) => return response,
     };
-    let id = match conversation_id(&conversation) {
-        Ok(id) => id,
-        Err(response) => return response,
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
     };
     match state
         .store
@@ -552,7 +549,7 @@ async fn delete_conversation(
         )
         .await
     {
-        Ok(Deleted::Deleted) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Deleted::Done) => StatusCode::NO_CONTENT.into_response(),
         Ok(Deleted::Busy) => still_working(),
         Ok(Deleted::NotFound) => no_conversation(),
         Err(_) => unavailable(),
@@ -570,9 +567,8 @@ async fn continue_conversation(
         Ok(member) => member,
         Err(response) => return response,
     };
-    let id = match conversation_id(&conversation) {
-        Ok(id) => id,
-        Err(response) => return response,
+    let Some(id) = conversation_id(&conversation) else {
+        return no_conversation();
     };
     let now = TimestampMillis::now();
     match state
