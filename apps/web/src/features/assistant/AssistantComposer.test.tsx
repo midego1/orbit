@@ -2,7 +2,7 @@ import { afterEach, expect, mock, test } from 'bun:test'
 import { useRef, useState } from 'react'
 import { act, fireEvent, waitFor } from '@testing-library/react'
 import { renderWithWorkspace } from '@/test/renderWithWorkspace'
-import { AssistantComposer } from './AssistantComposer'
+import { AssistantComposer, type ChatModels } from './AssistantComposer'
 import type { Mention } from './composer'
 
 const HOSTILE = '<img src=x onerror="alert(1)">'
@@ -34,7 +34,7 @@ function serve() {
   }) as unknown as typeof fetch
 }
 
-function Harness({ onSend, onNewChat, running = false }: { onSend: (text: string, mentions: Mention[]) => boolean; onNewChat: () => void; running?: boolean }) {
+function Harness({ onSend, onNewChat, running = false, chatModels }: { onSend: (text: string, mentions: Mention[]) => boolean; onNewChat: () => void; running?: boolean; chatModels?: ChatModels }) {
   const [draft, setDraft] = useState('')
   const [mentions, setMentions] = useState<Mention[]>([])
   const input = useRef<HTMLTextAreaElement>(null)
@@ -53,15 +53,16 @@ function Harness({ onSend, onNewChat, running = false }: { onSend: (text: string
       onStop={() => {}}
       onNewChat={onNewChat}
       newChatDisabled={running}
+      chatModels={chatModels}
     />
   )
 }
 
-function setup(path = '/tasks/ENG-1', running = false) {
+function setup(path = '/tasks/ENG-1', running = false, chatModels?: ChatModels) {
   serve()
   const onSend = mock((_text: string, _mentions: Mention[]) => true)
   const onNewChat = mock(() => {})
-  const view = renderWithWorkspace(<Harness onSend={onSend} onNewChat={onNewChat} running={running} />, { path })
+  const view = renderWithWorkspace(<Harness onSend={onSend} onNewChat={onNewChat} running={running} chatModels={chatModels} />, { path })
   const field = view.getByRole('combobox', { name: 'Message Ask AI' }) as HTMLTextAreaElement
   const type = (text: string) => fireEvent.change(field, { target: { value: text, selectionStart: text.length } })
   const key = (name: string) => fireEvent.keyDown(field, { key: name })
@@ -220,4 +221,35 @@ test('Enter while an input method composes neither sends nor picks (Safari repor
   type('hello')
   fireEvent.keyDown(field, { key: 'Enter' })
   expect(onSend).toHaveBeenCalledWith('hello', [])
+})
+
+test('/model shows only when the workspace allows more than one model, and lists only the allowed ones', async () => {
+  const single = setup('/tasks', false, { model: 'claude-sonnet-5-5', models: ['claude-sonnet-5-5'], onPick: () => {} })
+  single.type('/m')
+  expect(single.view.queryByRole('listbox', { name: 'Commands' })).toBeNull()
+  single.view.unmount()
+
+  const onPick = mock((_model: string) => {})
+  const { view, field, type, key, selected, onSend } = setup('/tasks', false, { model: 'claude-sonnet-5-5', models: ['claude-sonnet-5-5', 'claude-haiku-5-5'], onPick })
+  type('/m')
+  expect(selected()).toBe('/modelPick the model of this chat')
+  key('Enter')
+  await waitFor(() => expect(field.value).toBe('/model '))
+  // the allowed models only: Opus is not offered here
+  const models = view.getByRole('listbox', { name: 'Models' })
+  expect(models.textContent).toContain('Sonnet 5.5')
+  expect(models.textContent).toContain('Haiku 5.5')
+  expect(models.textContent).not.toContain('Opus')
+  type('/model hai')
+  expect(view.getAllByRole('option').map((option) => option.textContent)).toEqual(['Haiku 5.5'])
+  key('Enter')
+  expect(onPick).toHaveBeenCalledWith('claude-haiku-5-5')
+  await waitFor(() => expect(field.value).toBe(''))
+  // a model that is not allowed is never picked and never sent to the model as a message
+  type('/model opus')
+  expect(view.queryByRole('listbox', { name: 'Models' })).toBeNull()
+  key('Enter')
+  expect(onPick).toHaveBeenCalledTimes(1)
+  expect(onSend).not.toHaveBeenCalled()
+  await act(async () => {})
 })

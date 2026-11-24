@@ -4,6 +4,8 @@ import { SettingsCard } from '@/components/common/SettingsCard'
 import { InfoTip } from '@/components/common/InfoTip'
 import { confirmAction } from '@/components/common/confirmAction'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
@@ -12,7 +14,7 @@ import { LoadingText } from '@/components/ui/spinner'
 import { FieldGrid } from '@/features/settings/components/SettingsParts'
 import { useCan } from '@/features/workspaces/permissions'
 import { useWorkspace } from '@/features/workspaces/workspaceContext'
-import { AssistantApiError, MODEL_LABELS, useAiSettings, useRemoveAiKey, useSaveAiSettings, useTestAiKey, type AiSettings, type UsageView } from '@/features/assistant/api'
+import { AssistantApiError, MODEL_LABELS, modelName, useAiSettings, useRemoveAiKey, useSaveAiSettings, useTestAiKey, type AiSettings, type UsageView } from '@/features/assistant/api'
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof AssistantApiError ? error.message : fallback
@@ -40,7 +42,7 @@ export function AiPage() {
   }
   return (
     <>
-      <KeyForm key={`${settings.data.model}:${settings.data.key.last4 ?? ''}:${settings.data.dailyTokenCap}`} workspaceId={workspace.id} settings={settings.data} />
+      <KeyForm key={`${settings.data.model}:${settings.data.key.last4 ?? ''}:${settings.data.dailyTokenCap}:${settings.data.allowedModels.join(',')}`} workspaceId={workspace.id} settings={settings.data} />
       <UsageCard settings={settings.data} />
     </>
   )
@@ -48,6 +50,8 @@ export function AiPage() {
 
 function KeyForm({ workspaceId, settings }: { workspaceId: string; settings: AiSettings }) {
   const [model, setModel] = useState(settings.model)
+  // the models members may pick per chat, besides the workspace's model (which is always allowed)
+  const [allowed, setAllowed] = useState(() => settings.allowedModels.filter((other) => other !== settings.model))
   const [apiKey, setApiKey] = useState('')
   const [cap, setCap] = useState(String(settings.dailyTokenCap))
   const [tested, setTested] = useState<string | null>(null)
@@ -65,7 +69,7 @@ function KeyForm({ workspaceId, settings }: { workspaceId: string; settings: AiS
       return
     }
     try {
-      await save.mutateAsync({ model, dailyTokenCap, ...(typed ? { apiKey: typed } : {}) })
+      await save.mutateAsync({ model, dailyTokenCap, allowedModels: allowed.filter((other) => other !== model), ...(typed ? { apiKey: typed } : {}) })
       setApiKey('')
       toast.success('AI settings saved')
     } catch (error) {
@@ -133,6 +137,26 @@ function KeyForm({ workspaceId, settings }: { workspaceId: string; settings: AiS
               </SelectContent>
             </Select>
           </Field>
+          <div role="group" aria-labelledby="ai-chat-models" className="flex flex-col gap-2" data-testid="ai-chat-models">
+            <span className="flex items-center gap-1.5">
+              <span id="ai-chat-models" className="text-sm font-medium">Models members may pick per chat</span>
+              <InfoTip text="Members pick one of these for a chat with /model or the model menu in the Ask AI panel. The model above is always allowed and is what a new chat uses. If you take a model off the list, chats that use it go back to the model above on their next message, and the member is told." />
+            </span>
+            {options.map((option) => {
+              const isDefault = option.value === model
+              return (
+                <Label key={option.value} className="flex items-center gap-2 font-normal">
+                  <Checkbox
+                    checked={isDefault || allowed.includes(option.value)}
+                    disabled={isDefault}
+                    onCheckedChange={(checked) => setAllowed(checked ? [...allowed, option.value] : allowed.filter((other) => other !== option.value))}
+                  />
+                  {modelName(option.value)}
+                  {isDefault ? <span className="text-xs text-muted-foreground">(the workspace's model)</span> : null}
+                </Label>
+              )
+            })}
+          </div>
           <Field>
             <FieldLabel htmlFor="ai-cap" className="items-center gap-1.5">
               Daily token limit

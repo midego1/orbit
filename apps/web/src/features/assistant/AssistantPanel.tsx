@@ -20,6 +20,7 @@ import { ArrowUpRight, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles
 import { cn } from 'cn'
 import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { toast } from 'sonner'
 import { Spinner } from '@/components/ui/spinner'
 import { renderMarkdownBlocks } from '@/lib/markdown'
 import { MarkdownTextContext } from '@/lib/markdownTextContext'
@@ -29,11 +30,12 @@ import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
-import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
+import { assistantBase, assistantKeys, fetchAssistantStatus, modelName, setChatModel, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
 import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
-import { AssistantComposer, MentionChip } from './AssistantComposer'
+import { AssistantComposer, MentionChip, type ChatModels } from './AssistantComposer'
+import { ChatModelPicker } from './ChatModelPicker'
 import { mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention } from './composer'
 import { useAskDraft } from './useAskDraft'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
@@ -115,11 +117,38 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
       </PanelShell>
     )
   }
+  // the chat's model, as the server stored it (a pick it refuses changes nothing)
+  function setModel(model: string) {
+    client.setQueryData<AssistantStatus>(key, (old) => (old?.conversation ? { ...old, conversation: { ...old.conversation, model } } : old))
+  }
+  const chatModels: ChatModels = {
+    model: conversation.model,
+    models: status.data.models,
+    onPick: (model) => {
+      if (model === conversation.model) return
+      setChatModel(workspace.id, conversation.id, model)
+        .then((picked) => {
+          setModel(picked.model)
+          client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, models: picked.models } : old))
+          toast.success(`This chat now uses ${modelName(picked.model)}`)
+        })
+        .catch((error: unknown) => {
+          toast.error(error instanceof Error ? error.message : 'The model could not be changed.')
+          void status.refetch()
+        })
+    },
+  }
   return (
     <ConversationRuntime
       key={conversation.id}
       workspaceId={workspace.id}
       conversation={conversation}
+      chatModels={chatModels}
+      onModelFallback={(model, previous) => {
+        setModel(model)
+        void status.refetch()
+        toast.info(`${modelName(previous)} is no longer allowed in this workspace, so this chat now uses ${modelName(model)}.`)
+      }}
       onClose={onClose}
       onNewChat={() => void newChat()}
       onGone={() => void status.refetch()}
@@ -127,9 +156,11 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
   )
 }
 
-function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onGone }: {
+function ConversationRuntime({ workspaceId, conversation, chatModels, onModelFallback, onClose, onNewChat, onGone }: {
   workspaceId: string
   conversation: AssistantConversation
+  chatModels: ChatModels
+  onModelFallback: (model: string, previous: string) => void
   onClose: () => void
   onNewChat: () => void
   onGone: () => void
@@ -138,6 +169,21 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   // the mentions of the message being sent (kinds and ids): the server reads each item again with the member's access
   const mentions = useRef('[]')
   const agent = useMemo(() => new HttpAgent({ url: `${assistantBase(workspaceId)}/run`, threadId: conversation.id }), [workspaceId, conversation.id])
+  // the server says once when an admin took this chat's model off the list
+  const fallback = useRef(onModelFallback)
+  useEffect(() => {
+    fallback.current = onModelFallback
+  })
+  useEffect(() => {
+    const subscription = agent.subscribe({
+      onCustomEvent: ({ event }) => {
+        if (event.name !== 'orbit.model_fallback') return
+        const value = event.value as { model?: unknown; previous?: unknown } | null
+        if (typeof value?.model === 'string' && typeof value.previous === 'string') fallback.current(value.model, value.previous)
+      },
+    })
+    return () => subscription.unsubscribe()
+  }, [agent])
   // The server owns the conversation: the panel reads it once and never writes it back.
   const history = useMemo<ThreadHistoryAdapter>(
     () => ({
@@ -171,6 +217,7 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <Thread
+        chatModels={chatModels}
         onClose={onClose}
         onNewChat={onNewChat}
         setMentions={(value) => {
@@ -217,7 +264,8 @@ function isWaiting(approval: { approved?: boolean; resolution?: string } | undef
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-function Thread({ onClose, onNewChat, setMentions: setRunMentions, runError, clearError, onStop }: {
+function Thread({ chatModels, onClose, onNewChat, setMentions: setRunMentions, runError, clearError, onStop }: {
+  chatModels: ChatModels
   onClose: () => void
   onNewChat: () => void
   setMentions: (serialized: string) => void
@@ -309,6 +357,7 @@ function Thread({ onClose, onNewChat, setMentions: setRunMentions, runError, cle
 
   const tools = (
     <>
+      <ChatModelPicker chatModels={chatModels} disabled={running} />
       <Tip label={follow ? 'Follow along is on: the page goes where Ask AI works' : 'Follow along is off: Ask AI shows a link instead'}>
         <Button variant="ghost" size="icon-sm" aria-label="Follow along" aria-pressed={follow} className={cn(follow ? 'text-foreground' : 'text-muted-foreground')} onClick={() => assistantUi.setFollow(!follow)}>
           {follow ? <Eye /> : <EyeSlash />}
@@ -405,6 +454,7 @@ function Thread({ onClose, onNewChat, setMentions: setRunMentions, runError, cle
             }}
             onNewChat={onNewChat}
             newChatDisabled={running}
+            chatModels={running ? { ...chatModels, onPick: () => {} } : chatModels}
             footer={<p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>}
           />
         </ThreadPrimitive.Root>

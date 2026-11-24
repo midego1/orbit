@@ -10,13 +10,18 @@ export type AssistantConversation = {
   messages: unknown[]
   expiresAt: number
   busy: boolean
+  /** The model this chat's next run uses (the server checks it against the allowed models on every run). */
+  model: string
 }
 
 export type AssistantStatus = {
   conversation: AssistantConversation | null
   setup: AssistantSetup
   canManage: boolean
+  /** The workspace's model. */
   model: string
+  /** The models a member may pick for a chat: the workspace's model first. */
+  models: string[]
 }
 
 export type UsageTotals = {
@@ -40,6 +45,8 @@ export type AiSettings = {
   provider: 'anthropic'
   model: string
   models: string[]
+  /** The models members may pick per chat: the workspace's model first, then the ones an admin allowed. */
+  allowedModels: string[]
   key: { set: boolean; last4: string | null; source: 'workspace' | 'server' | null }
   appKey: boolean
   usage: { today: UsageView; last30Days: UsageView }
@@ -107,6 +114,14 @@ export function stopConversation(workspaceId: string, conversationId: string): P
   return request(`${assistantBase(workspaceId)}/conversations/${encodeURIComponent(conversationId)}/stop`, { method: 'POST' })
 }
 
+/** Picks the model of the user's own chat; the server refuses a model the workspace does not allow. */
+export function setChatModel(workspaceId: string, conversationId: string, model: string): Promise<{ model: string; models: string[] }> {
+  return request(`${assistantBase(workspaceId)}/conversations/${encodeURIComponent(conversationId)}/model`, {
+    method: 'PUT',
+    body: JSON.stringify({ model }),
+  })
+}
+
 export function useAiSettings(workspaceId: string, enabled: boolean) {
   return useQuery({
     queryKey: assistantKeys.settings(workspaceId),
@@ -118,7 +133,7 @@ export function useAiSettings(workspaceId: string, enabled: boolean) {
 export function useSaveAiSettings(workspaceId: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (body: { model: string; apiKey?: string; dailyTokenCap?: number }) =>
+    mutationFn: (body: { model: string; apiKey?: string; dailyTokenCap?: number; allowedModels?: string[] }) =>
       request<AiSettings>(`${assistantBase(workspaceId)}/settings`, { method: 'PUT', body: JSON.stringify(body) }),
     onSuccess: (settings) => {
       client.setQueryData(assistantKeys.settings(workspaceId), settings)
@@ -149,4 +164,15 @@ export const MODEL_LABELS: Record<string, string> = {
   'claude-sonnet-5-5': 'Claude Sonnet 5.5 (recommended)',
   'claude-opus-5-5': 'Claude Opus 5.5 (most capable, about twice the price)',
   'claude-haiku-5-5': 'Claude Haiku 5.5 (fastest and cheapest)',
+}
+
+/** The short name the panel shows ("Sonnet 5.5"). */
+export const MODEL_NAMES: Record<string, string> = {
+  'claude-sonnet-5-5': 'Sonnet 5.5',
+  'claude-opus-5-5': 'Opus 5.5',
+  'claude-haiku-5-5': 'Haiku 5.5',
+}
+
+export function modelName(model: string): string {
+  return MODEL_NAMES[model] ?? model
 }

@@ -1,5 +1,6 @@
 // The Ask AI composer: the message field with its "/" command menu and "@" mention picker, the mentions as chips, and
-// the send and stop buttons. A command only writes a prompt (or starts a new chat); a mention only names an item by its
+// the send and stop buttons. A command only writes a prompt (or starts a new chat, or picks the chat's model among the
+// ones the server allows); a mention only names an item by its
 // id, which the server reads again with the member's own access. Every label is plain text.
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import { useLocation } from 'react-router'
@@ -14,9 +15,11 @@ import {
   commandPrompt,
   insertMention,
   matchingCommands,
+  matchingModels,
   MAX_MENTIONS,
   mentionQuery,
   mentionsToSend,
+  modelQuery,
   parseSlash,
   removeMention,
   slashQuery,
@@ -25,9 +28,18 @@ import {
   type SlashCommand,
 } from './composer'
 import { GROUP, useMentionOptions, type MentionOption } from './mentionOptions'
+import { modelName } from './api'
+
+/** The chat's model and the ones the member may pick (from the server; the server checks every pick again). */
+export interface ChatModels {
+  model: string
+  models: string[]
+  onPick: (model: string) => void
+}
 
 type Menu =
   | { type: 'slash'; items: SlashCommand[] }
+  | { type: 'model'; items: { id: string; name: string }[] }
   | { type: 'mention'; start: number; items: MentionOption[]; loading: boolean }
 
 export function AssistantComposer({
@@ -44,6 +56,7 @@ export function AssistantComposer({
   onStop,
   onNewChat,
   newChatDisabled,
+  chatModels,
   footer,
 }: {
   workspaceId: string
@@ -60,6 +73,7 @@ export function AssistantComposer({
   onStop: () => void
   onNewChat: () => void
   newChatDisabled: boolean
+  chatModels?: ChatModels
   footer?: ReactNode
 }) {
   const location = useLocation()
@@ -71,9 +85,12 @@ export function AssistantComposer({
   const listId = useId()
   const where = `${draft}\u0000${cursor}`
 
+  const canPickModel = (chatModels?.models.length ?? 0) > 1
   const slash = slashQuery(draft, cursor)
-  const commands = slash === null ? [] : matchingCommands(slash)
-  const mentionAt = slash === null ? mentionQuery(draft, cursor, mentions.map((mention) => mention.label)) : null
+  const commands = slash === null ? [] : matchingCommands(slash, canPickModel)
+  const modelAt = canPickModel ? modelQuery(draft, cursor) : null
+  const models = modelAt === null || !chatModels ? [] : matchingModels(chatModels.models.map((id) => ({ id, name: modelName(id) })), modelAt)
+  const mentionAt = slash === null && modelAt === null ? mentionQuery(draft, cursor, mentions.map((mention) => mention.label)) : null
   const full = mentionsToSend(draft, mentions).length >= MAX_MENTIONS
   const picker = useMentionOptions(workspaceId, mentionAt && !full ? mentionAt.query : null)
   const menu: Menu | null =
@@ -81,12 +98,14 @@ export function AssistantComposer({
       ? null
       : commands.length > 0
         ? { type: 'slash', items: commands }
-        : mentionAt && !full && (picker.options.length > 0 || picker.loading)
+        : models.length > 0
+          ? { type: 'model', items: models }
+          : mentionAt && !full && (picker.options.length > 0 || picker.loading)
           ? { type: 'mention', start: mentionAt.start, items: picker.options, loading: picker.loading }
           : null
   const count = menu?.items.length ?? 0
   const highlighted = Math.max(0, Math.min(active, count - 1))
-  const menuKey = menu ? `${menu.type}:${slash ?? mentionAt?.query ?? ''}` : ''
+  const menuKey = menu ? `${menu.type}:${slash ?? modelAt ?? mentionAt?.query ?? ''}` : ''
   const lastMenuKey = useRef(menuKey)
   useEffect(() => {
     // a new query highlights the first row again
@@ -108,7 +127,19 @@ export function AssistantComposer({
     })
   }
 
+  function pickModel(model: string) {
+    place('', 0)
+    chatModels?.onPick(model)
+  }
+
   function runCommand(command: SlashCommand, rest = '') {
+    if ('action' in command.run && command.run.action === 'model') {
+      // "/model opus" picks at once; "/model" lists the allowed models
+      const found = rest.trim() && chatModels ? matchingModels(chatModels.models.map((id) => ({ id, name: modelName(id) })), rest.trim().toLowerCase()) : []
+      if (found.length === 1) pickModel(found[0]!.id)
+      else place('/model ', '/model '.length)
+      return
+    }
     if ('action' in command.run) {
       // while a run goes on there is no new chat: the draft stays as it is
       if (newChatDisabled) return
@@ -130,15 +161,16 @@ export function AssistantComposer({
   function choose(index: number) {
     if (!menu) return
     if (menu.type === 'slash') runCommand(menu.items[index]!)
+    else if (menu.type === 'model') pickModel(menu.items[index]!.id)
     else if (menu.items[index]) pickMention(menu.items[index], menu.start)
   }
 
   function send() {
     const text = draft.trim()
     if (!text || running || waiting || loading) return
-    const slashed = parseSlash(text)
+    const slashed = parseSlash(text, canPickModel)
     if (slashed && 'action' in slashed.command.run) {
-      runCommand(slashed.command)
+      runCommand(slashed.command, slashed.rest)
       return
     }
     const message = slashed ? (commandPrompt(slashed.command, path, slashed.rest) ?? text) : text
@@ -191,12 +223,19 @@ export function AssistantComposer({
     >
       <div className="relative">
         {menu ? (
-          <ComposerMenu id={listId} label={menu.type === 'slash' ? 'Commands' : 'Mention a task, project, doc or person'} loading={menu.type === 'mention' && menu.loading}>
+          <ComposerMenu id={listId} label={menu.type === 'slash' ? 'Commands' : menu.type === 'model' ? 'Models' : 'Mention a task, project, doc or person'} loading={menu.type === 'mention' && menu.loading}>
             {menu.type === 'slash'
               ? menu.items.map((command, index) => (
                   <MenuRow key={command.name} id={optionId(index)} active={index === highlighted} tip={commandTip(command, path)} onHover={() => setActive(index)} onPick={() => choose(index)}>
                     <span className="shrink-0 font-mono text-[0.8125rem] font-medium text-foreground">/{command.name}</span>
                     <span className="min-w-0 truncate text-[0.8125rem] text-muted-foreground">{command.label}</span>
+                  </MenuRow>
+                ))
+              : menu.type === 'model'
+              ? menu.items.map((model, index) => (
+                  <MenuRow key={model.id} id={optionId(index)} active={index === highlighted} onHover={() => setActive(index)} onPick={() => choose(index)}>
+                    <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium text-foreground">{model.name}</span>
+                    {model.id === chatModels?.model ? <span className="shrink-0 text-xs text-muted-foreground">this chat</span> : null}
                   </MenuRow>
                 ))
               : menu.items.map((option, index) => (
@@ -286,6 +325,7 @@ export function AssistantComposer({
 }
 
 function commandTip(command: SlashCommand, path: string): string {
+  if ('action' in command.run && command.run.action === 'model') return 'Lists the models this workspace allows for a chat.'
   return commandPrompt(command, path) ?? 'Ends this chat and starts a new one.'
 }
 

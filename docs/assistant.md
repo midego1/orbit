@@ -8,6 +8,12 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 
 - A workspace owner or admin opens **Settings → AI**, pastes an Anthropic API key, clicks **Test** and **Save**, and
   picks a model (Claude Sonnet 5.5 by default, Opus 5.5 or Haiku 5.5).
+- **Models per chat:** the admin can also tick other models that members may pick per chat (column
+  `workspace_ai_settings.allowed_models`; none by default, so every chat uses the workspace's model). A member picks
+  one with `/model` or the model menu in the panel's header; the server stores the pick on the conversation
+  (`assistant_conversations.model`) only when it is on the list, and every run checks it again. When an admin takes
+  a model off the list, the chat's next run uses the workspace's model, clears the pick and tells the member once
+  (AG-UI `CUSTOM` event `orbit.model_fallback`). The daily limit and usage count every model the same way, per model.
 - The key is sealed with the app key (`ORBIT_APP_KEY`) for that workspace only and is never shown again: the page
   shows its last four characters. Without an app key the server refuses to store a key.
 - `ORBIT_AI_ANTHROPIC_KEY` (optional) is used only by workspaces **without a key of their own**. On a server with
@@ -54,8 +60,8 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - **Commands:** "/" at the start of the field opens a menu (↑/↓, Enter or Tab, Esc; the full prompt shows on hover):
   `/summarize` (this page), `/plan` (this week), `/standup` (what changed since yesterday) write a plain prompt into
   the field, which you can still edit; text after a typed command is added to it. `/new` starts a new chat. A command
-  is only text: it runs like any other message, with the same approvals. There is no `/model`: the model is the
-  workspace's setting (Settings → AI), not a member's choice per chat.
+  is only text: it runs like any other message, with the same approvals. `/model` (only when the workspace allows more
+  than one model) lists the allowed models; `/model haiku` picks one at once. It is not sent to the model.
 - **Mentions:** "@" opens a picker of people, tasks, projects and docs (the app's own searches). A pick writes
   `@ENG-12` (a task's key, otherwise the name) into the message and shows as a chip above the field. The message
   sends only each mention's kind and id (context entry `mentions`, at most 10, only those still named in the text).
