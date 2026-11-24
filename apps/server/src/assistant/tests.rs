@@ -4294,14 +4294,14 @@ async fn each_change_of_a_batch_counts_toward_the_messages_tool_calls() {
     )])
     .await;
     harness.limits.max_tool_calls = 3;
-    let mut state = state();
+    let mut within = super::tests::state();
     assert_eq!(
-        harness.run(&mut state, ask("three")).await.0,
+        harness.run(&mut within, ask("three")).await.0,
         Outcome::Paused
     );
-    assert_eq!(state.turn.tool_calls, 3);
+    assert_eq!(within.turn.tool_calls, 3);
     // the approval id carries a part the server made, not only the model's call id
-    let interrupt = state.pending.as_ref().unwrap().interrupt_id.clone();
+    let interrupt = within.pending.as_ref().unwrap().interrupt_id.clone();
     assert!(
         interrupt.starts_with("approve:toolu_b:") && interrupt.len() > "approve:toolu_b:".len()
     );
