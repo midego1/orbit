@@ -255,10 +255,15 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   const empty = messages.length === 0
   const last = messages.at(-1)
   const callInFlight = last?.role === 'assistant' && last.content.some((part) => part.type === 'tool-call' && part.result === undefined)
-  const thinking = running && !callInFlight
+  const run = deriveRun({ running, messages })
+  // not while an approved change runs: its step (in the message that asked for it) shows that, and the status line
+  // says "Changing …"
+  const thinking = running && !callInFlight && run.state === 'thinking'
 
   useEffect(() => {
-    assistantUi.setRun(deriveRun({ running, messages }))
+    assistantUi.setRun(run)
+    // the run is derived from these two
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, messages])
   useEffect(() => () => assistantUi.setRun(IDLE_RUN), [])
   useEffect(() => {
