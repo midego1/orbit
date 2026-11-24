@@ -736,10 +736,7 @@ async fn run(
             }
         });
     }
-    let wanted = match &request {
-        Input::Message { text, .. } => mentions::requested(&input.context, text),
-        Input::Resume { .. } => Vec::new(),
-    };
+    let context = input.context.clone();
     let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, api_key);
     tokio::spawn(async move {
         let emitter = Emitter::new(sender);
@@ -749,12 +746,7 @@ async fn run(
         };
         // the member's mentions, read again with their own access (before the run, outside any transaction)
         let mut request = request;
-        if let Input::Message {
-            mentions: resolved, ..
-        } = &mut request
-        {
-            *resolved = mentions::resolve(&tools, &wanted).await;
-        }
+        mentions::attach(&mut request, &context, &tools, &cancel).await;
         let hooks = DbHooks {
             state: state.clone(),
             conversation: conversation.clone(),

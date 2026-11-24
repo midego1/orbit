@@ -1520,6 +1520,85 @@ async fn mentions_are_read_again_with_the_members_own_access() {
 }
 
 #[tokio::test]
+async fn a_runs_context_mentions_are_parsed_resolved_and_attached_to_its_message() {
+    use super::mentions::{self, Kind};
+    let input: super::RunInput = serde_json::from_value(json!({
+        "threadId": "thread",
+        "runId": "run",
+        "messages": [{"id": "m1", "role": "user", "content": "Look at @ENG-1 and @Ghost"}],
+        "context": [
+            {"description": "page", "value": "/tasks"},
+            {"description": "mentions", "value": json!([
+                {"kind": "task", "id": "t1", "token": "ENG-1"},
+                {"kind": "doc", "id": "d404", "token": "Ghost"},
+                {"kind": "person", "id": "u2", "token": "nobody"},
+            ]).to_string()},
+        ],
+    }))
+    .unwrap();
+    let tools = FakeTools::default();
+    let mut request = super::parse_input(&input).unwrap();
+    mentions::attach(
+        &mut request,
+        &input.context,
+        &tools,
+        &CancellationToken::new(),
+    )
+    .await;
+    let Input::Message { text, mentions, .. } = &request else {
+        panic!("a message");
+    };
+    assert_eq!(text, "Look at @ENG-1 and @Ghost");
+    // the doc cannot be read, so it is dropped; the person keeps no chip text ("@nobody" is not in the message)
+    assert_eq!(
+        mentions
+            .iter()
+            .map(|mention| (
+                mention.kind,
+                mention.id.as_str(),
+                mention.name.as_str(),
+                mention.token.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (Kind::Task, "t1", "Write the launch post", "ENG-1"),
+            (Kind::Person, "u2", "Grace Hopper", ""),
+        ]
+    );
+    // the server's own reads, not steps of the conversation
+    assert!(tools.calls.lock().unwrap().is_empty());
+    let mut names: Vec<String> = tools
+        .lookups
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["get_doc", "get_task", "list_members"]);
+
+    // a stopped run reads nothing in; an approval answer has no mentions
+    let mut request = super::parse_input(&input).unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    mentions::attach(&mut request, &input.context, &tools, &cancel).await;
+    assert!(matches!(&request, Input::Message { mentions, .. } if mentions.is_empty()));
+    let mut resume = Input::Resume {
+        interrupt_id: "i".into(),
+        approved: true,
+        allow_for_conversation: false,
+    };
+    mentions::attach(
+        &mut resume,
+        &input.context,
+        &tools,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(resume, Input::Resume { .. }));
+}
+
+#[tokio::test]
 async fn a_message_with_mentions_tells_the_model_and_keeps_them_for_the_panel() {
     use super::mentions::{Kind, Resolved};
     let harness = Harness::new(vec![text("Looking at it.")]).await;
@@ -1547,7 +1626,7 @@ async fn a_message_with_mentions_tells_the_model_and_keeps_them_for_the_panel() 
     let mentioned = first[0]["text"].as_str().unwrap();
     assert!(mentioned.starts_with("<mentions>"), "{mentioned}");
     assert!(
-        mentioned.contains("- task ENG-1 \"Fix login\" (task id t1)"),
+        mentioned.contains("- task \"ENG-1\" \"Fix login\" (task id t1)"),
         "{mentioned}"
     );
     assert!(
