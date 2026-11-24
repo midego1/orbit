@@ -1505,6 +1505,24 @@ impl Authorized<'_> {
         }
     }
 
+    /// A `list_tasks` assignee filter: a member's user ID, `none` for tasks without an assignee, or
+    /// `me` for the member the credential acts for (resolved here from the principal, never from
+    /// the caller). A service account acts for no one, so it cannot use `me`.
+    pub fn assignee_filter(&self, raw: &str) -> Result<AssigneeFilter> {
+        match raw.trim() {
+            "none" => Ok(AssigneeFilter::Unassigned),
+            "me" if self.principal.service_account.is_none() => {
+                Ok(AssigneeFilter::User(self.principal.actor_id))
+            }
+            "me" => Err(TokenApiError::Invalid(
+                "A service account has no `me`: use a member's user ID",
+            )),
+            id => id.parse().map(AssigneeFilter::User).map_err(|_| {
+                TokenApiError::Invalid("assignee_id must be a user ID, `me` or `none`")
+            }),
+        }
+    }
+
     /// [`Self::task_id`] of an optional reference, such as a `parent_task_id` field.
     pub async fn optional_task_id(&self, task_ref: Option<&str>) -> Result<Option<Id>> {
         match task_ref {

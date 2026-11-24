@@ -2871,6 +2871,160 @@ async fn the_totals_of_a_task_list_count_every_page_in_the_database() {
     );
 }
 
+/// "What is assigned to me?": `list_tasks` with assignee_id `me` lists only the member's own tasks, Orbit resolves
+/// `me` from the session (not from anything the model sends), and the card counts exactly those tasks.
+#[tokio::test]
+async fn assigned_to_me_lists_and_counts_only_the_members_own_tasks() {
+    use crate::mcp::TaskTools;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let session = |user: Id| {
+        let database = database.clone();
+        async move {
+            super::SessionTools {
+                tools: TaskTools::in_process(
+                    TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+                    super::REQUEST_ID,
+                ),
+                principal: super::principal(&database, w.workspace, Id::new_v7(), user)
+                    .await
+                    .unwrap(),
+            }
+        }
+    };
+    let tools = session(w.owner).await;
+    let statuses = tools
+        .call(
+            "list_task_statuses",
+            json!({"project_id": w.project.to_string()}),
+        )
+        .await
+        .unwrap();
+    let status = |category: &str| {
+        statuses["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|status| status["category"] == category)
+            .map(|status| status["id"].as_str().unwrap().to_owned())
+            .expect("a status of the category")
+    };
+    let (open, done) = (status("unstarted"), status("completed"));
+    let (owner, member) = (w.owner.to_string(), w.member.to_string());
+    let tasks: [(&str, &String, &[&String]); 7] = [
+        ("Mine 1", &open, &[&owner]),
+        ("Mine 2", &open, &[&owner, &member]),
+        ("Mine 3", &done, &[&owner]),
+        ("Theirs 1", &open, &[&member]),
+        ("Theirs 2", &done, &[&member]),
+        ("Nobody 1", &open, &[]),
+        ("Nobody 2", &done, &[]),
+    ];
+    for (title, status, assignees) in tasks {
+        tools
+            .call(
+                "create_task",
+                json!({"project_id": w.project.to_string(), "status_id": status, "title": title, "assignee_ids": assignees}),
+            )
+            .await
+            .unwrap();
+    }
+    let workspace = w.workspace;
+    // the owner's "me": their three tasks (one shared with the member), two open and one done
+    let (titles, card, model) =
+        listed_with_totals(&tools, json!({"assignee_id": "me", "limit": 2}), workspace).await;
+    assert_eq!(titles.len(), 2, "a page of two");
+    assert!(titles.iter().all(|title| title.starts_with("Mine")));
+    assert_eq!(
+        (&card["tasks"], &card["open"], &card["done"]),
+        (&json!(3), &json!(2), &json!(1))
+    );
+    assert_eq!(card["complete"], true);
+    assert_eq!(
+        model["tasks"], 3,
+        "the model gets the same totals as the card"
+    );
+    assert_eq!(model["open"], 2);
+    let (titles, card, _) =
+        listed_with_totals(&tools, json!({"assignee_id": "me"}), workspace).await;
+    assert_eq!(titles, vec!["Mine 1", "Mine 2", "Mine 3"]);
+    assert_eq!(card["tasks"], 3);
+    // the same filter by the owner's own id gives the same tasks
+    let (by_id, _, _) = listed_with_totals(&tools, json!({"assignee_id": owner}), workspace).await;
+    assert_eq!(by_id, titles);
+    // the member's "me" is the member's tasks, not the owner's
+    let member_tools = session(w.member).await;
+    let (titles, card, _) =
+        listed_with_totals(&member_tools, json!({"assignee_id": " me "}), workspace).await;
+    assert_eq!(titles, vec!["Mine 2", "Theirs 1", "Theirs 2"]);
+    assert_eq!(
+        (&card["tasks"], &card["open"], &card["done"]),
+        (&json!(3), &json!(2), &json!(1))
+    );
+    // `none`: tasks without an assignee; filters combine with the status
+    let (titles, card, _) =
+        listed_with_totals(&tools, json!({"assignee_id": "none"}), workspace).await;
+    assert_eq!(titles, vec!["Nobody 1", "Nobody 2"]);
+    assert_eq!(card["tasks"], 2);
+    let (titles, card, _) = listed_with_totals(
+        &tools,
+        json!({"assignee_id": "me", "status_id": open}),
+        workspace,
+    )
+    .await;
+    assert_eq!(titles, vec!["Mine 1", "Mine 2"]);
+    assert_eq!((&card["tasks"], &card["done"]), (&json!(2), &json!(0)));
+    // no filter: every task, as before
+    let (titles, card, _) = listed_with_totals(&tools, json!({}), workspace).await;
+    assert_eq!(titles.len(), 7);
+    assert_eq!(card["tasks"], 7);
+    // a value that is no user id, `me` or `none` is refused, and so is the count
+    assert!(
+        tools
+            .call("list_tasks", json!({"assignee_id": "everyone"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        tools
+            .lookup(
+                super::cards::COUNT_TASKS,
+                json!({"assignee_id": "everyone"})
+            )
+            .await
+            .is_err()
+    );
+}
+
+/// The sorted titles a `list_tasks` call lists, with its card's totals and the totals the model gets.
+async fn listed_with_totals(
+    tools: &super::SessionTools,
+    input: Value,
+    workspace: Id,
+) -> (Vec<String>, Value, Value) {
+    let mut value = tools.call("list_tasks", input.clone()).await.unwrap();
+    let mut titles: Vec<String> = value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["title"].as_str().unwrap().to_owned())
+        .collect();
+    titles.sort();
+    let card = super::cards::read_card(
+        &super::cards::Names::default(),
+        tools,
+        "list_tasks",
+        &input,
+        &mut value,
+        workspace,
+    )
+    .await
+    .unwrap();
+    (titles, card["totals"].clone(), value["totals"].clone())
+}
+
 /// The count of each (project, status) when paging through `tasks()` two at a time.
 async fn paged_counts(
     repository: &crate::repositories::tasks::TaskRepository,
