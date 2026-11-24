@@ -36,6 +36,17 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   before → after (the old value struck through); a new task shows as a card. A message that made changes ends with
   "N changes applied" and a link per change. Every text in a card is plain text; every link is an in-app path built
   from an id and checked again in the panel.
+- **Several changes at once:** when one request needs several changes, the model proposes them together
+  (`propose_changes`, up to 20). The panel shows one approval group with a card per change (the same previews and
+  before → after, read by the server when the batch is proposed), a checkbox per change (all ticked at first),
+  **Approve N selected** and **Decline all**. Orbit runs the approved ones in the batch's order, each through the
+  normal change path (the member's own permissions, audit, card), and stops at the first failure; the summary then
+  says "3 applied · 1 failed · 4 not run" and gives the reason per change. Nothing runs that the user did not approve.
+- **Undo:** the summary card has **Undo** per change and **Undo all** for task changes Ask AI made: a created task
+  goes to the trash (restorable there for 30 days), an update gets its previous values back. Undo works only while
+  the task is as Ask AI left it (nobody changed it since; else "was changed after Ask AI's change"), within 24 hours,
+  in the same chat, and once. Two changes to one task are undone newest first (Undo all does that in one go). The
+  model cannot undo anything; the next message tells it what the user undid.
 - A task key in an answer (`GEN-1`) is a link with the task's title and status on hover, but only when a card of this
   conversation named that task; other keys, and keys in code, stay text.
 - A task list the model sees carries `totals` (all, open, done, per project and per status), counted by Orbit over
@@ -86,6 +97,10 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
 - Reads run at once. Every change waits for the member's approval of the exact arguments, which the server keeps
   (the client only answers approve or decline). The card shows text arguments as plain text: code fences and HTML
   stay visible, nothing is rendered.
+- A batch is one approval: the client answers with the server's ids of the changes it keeps (an id that is not in the
+  waiting batch, a repeat or an empty list refuses the whole answer, and nothing runs). The model must pick tools it
+  may call now; a batch with a read, a hidden tool or a tool it has not loaded is refused before anyone sees it.
+  "Allow in this chat" is never offered for a batch, and a tool allowed for the chat still waits inside one.
 - **Allow in this chat** skips the approval of that kind of change for the rest of the conversation, but only for
   structured changes (a status, a name, assignees, labels, dates, a project's settings). It is never offered for:
   - tools that overwrite, replace or move content (MCP's destructive flag);
@@ -128,6 +143,12 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   workspace owner or admin: no admin page or workspace export includes them (instance backups hold them, like every
   table). The API answers another member's or another workspace's conversation with 404. Token usage per request (no content) is kept for the usage
   table in Settings → AI, also after a conversation is deleted.
+- Undo: 24 hours after the change, only in the member's active conversation (an earlier chat of the history is
+  read-only and shows no Undo; continuing it brings Undo back while the 24 hours last). An undo of a created task is
+  refused when someone gave it sub-issues since (also when one is added during the undo: the task is put back from
+  the trash). An update that moved the task under another parent, changed its recurrence or marked it a duplicate,
+  and a status change of a recurring task, cannot be undone. An undo does not reverse side effects of automations (a
+  parent the sub-issue automation closed).
 
 ## Usage and cost
 
@@ -141,7 +162,8 @@ priced". Prices can change: the invoice is what counts.
 ## Audit
 
 Changes made by Ask AI are audited as the member with request id `assistant` and `via: "assistant"`, plus an
-`assistant.change` row (applied, declined or failed) per change. Settings changes write
+`assistant.change` row (applied, declined or failed) per change, also per change of a batch. Each undo writes
+`assistant.undo` (undone, conflict or failed); its own writes are audited like Ask AI's changes. Settings changes write
 `workspace.ai_settings_updated` (never the key).
 
 ## Notes

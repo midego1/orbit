@@ -15,6 +15,7 @@
 //! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/continue` make it the active one again,
 //! `POST /api/v1/assistant/workspaces/{id}/run` one AG-UI run (SSE),
 //! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/stop`,
+//! `POST /api/v1/assistant/workspaces/{id}/conversations/{conversation}/undo` (undo changes Ask AI made, `undo.rs`),
 //! `GET|PUT /api/v1/assistant/workspaces/{id}/settings`, `DELETE …/settings/key`, `POST …/settings/test`
 //! (workspace owners and admins).
 
@@ -30,6 +31,7 @@ pub(crate) mod settings;
 pub(crate) mod store;
 #[cfg(test)]
 mod tests;
+pub(crate) mod undo;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -238,6 +240,10 @@ pub(crate) fn router(state: AssistantState) -> Router {
             &format!("{base}/conversations/{{conversation_id}}/stop"),
             post(stop),
         )
+        .route(
+            &format!("{base}/conversations/{{conversation_id}}/undo"),
+            post(undo_changes),
+        )
         .route(&format!("{base}/run"), post(run))
         .route(
             &format!("{base}/settings"),
@@ -335,9 +341,61 @@ fn setup_word(key: &KeyState) -> &'static str {
     }
 }
 
+/// The summary cards of a conversation with each change's undo state as it is now (the cards were stored as they were
+/// when the message ended).
+fn with_undo_states(
+    messages: &mut [Value],
+    state: &ConversationState,
+    now: TimestampMillis,
+    active: bool,
+) {
+    for message in messages.iter_mut() {
+        if message["role"] != "tool" {
+            continue;
+        }
+        let Some(content) = message["content"].as_str() else {
+            continue;
+        };
+        if !content.contains("\"undo\"") {
+            continue;
+        }
+        let Ok(mut view) = serde_json::from_str::<Value>(content) else {
+            continue;
+        };
+        if view["card"]["kind"] != "summary" {
+            continue;
+        }
+        let Some(changes) = view["card"]["changes"].as_array_mut() else {
+            continue;
+        };
+        for change in changes {
+            let Some(id) = change["undo"]["id"].as_str() else {
+                continue;
+            };
+            // an earlier chat of the history is read-only: no Undo there
+            if !active {
+                if let Some(fields) = change.as_object_mut() {
+                    fields.remove("undo");
+                }
+                continue;
+            }
+            let word = state
+                .undo
+                .iter()
+                .find(|record| record.id == id)
+                .map_or("expired", |record| {
+                    undo::state_word(record, now.as_millis())
+                });
+            change["undo"]["state"] = json!(word);
+        }
+        message["content"] = json!(view.to_string());
+    }
+}
+
 /// The AG-UI messages of a conversation, with the approval card that waits, if any.
 fn conversation_view(conversation: &Conversation, now: TimestampMillis) -> Value {
     let mut messages = conversation.state.display.clone();
+    with_undo_states(&mut messages, &conversation.state, now, conversation.active);
     // only the active conversation can answer an approval: an archived one never shows its card
     if conversation.active
         && let Some(pending) = &conversation.state.pending
@@ -700,6 +758,256 @@ async fn stop(
 }
 
 #[derive(Deserialize)]
+struct UndoBody {
+    ids: Vec<String>,
+}
+
+/// Saves a conversation during an undo, under the undo's own lease.
+struct LeaseSaver<'a> {
+    store: &'a ConversationStore,
+    conversation: &'a Conversation,
+    lease: &'a str,
+}
+
+impl undo::UndoSaver for LeaseSaver<'_> {
+    fn save<'a>(&'a self, state: &'a ConversationState) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.store
+                .save(
+                    self.conversation,
+                    state,
+                    self.lease,
+                    false,
+                    TimestampMillis::now(),
+                )
+                .await
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// Undoes changes Ask AI made in the member's own conversation, with the member's own permissions (`undo.rs`). Not a
+/// tool: only the user can ask for it, from the panel.
+async fn undo_changes(
+    State(state): State<AssistantState>,
+    Path((workspace, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<UndoBody>,
+) -> Response {
+    let member = match member(&state, &headers, &workspace).await {
+        Ok(member) => member,
+        Err(response) => return response,
+    };
+    let Ok(conversation_id) = conversation.parse::<Id>() else {
+        return problem(StatusCode::NOT_FOUND, "not_found", "No such conversation.");
+    };
+    match undo_for(
+        &state,
+        member.workspace_id,
+        member.user_id,
+        conversation_id,
+        &body.ids,
+    )
+    .await
+    {
+        Ok(results) => Json(json!({"results": results})).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// The undo of `ids` in the conversation, for the signed-in member `user_id` of `workspace_id`: only their own
+/// conversation (another user's is "not found"), never while a run holds it.
+pub(crate) async fn undo_for(
+    state: &AssistantState,
+    workspace_id: Id,
+    user_id: Id,
+    conversation_id: Id,
+    ids: &[String],
+) -> Result<Vec<Value>, Response> {
+    let member = UndoMember {
+        workspace_id,
+        user_id,
+    };
+    let body = UndoBody { ids: ids.to_vec() };
+    if body.ids.is_empty()
+        || body.ids.len() > undo::MAX_IDS
+        || body.ids.iter().any(|id| id.is_empty() || id.len() > 64)
+    {
+        return Err(problem(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_ids",
+            "Name between 1 and 50 changes to undo.",
+        ));
+    }
+    let now = TimestampMillis::now();
+    // only the owner's own conversation, and only the active one: an earlier chat of the history is read-only
+    let conversation = match state
+        .store
+        .get(conversation_id, member.workspace_id, member.user_id, now)
+        .await
+    {
+        Ok(Some(conversation)) if !conversation.active => {
+            return Err(problem(
+                StatusCode::CONFLICT,
+                "read_only",
+                "This is an earlier chat: continue it to undo its changes.",
+            ));
+        }
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => {
+            return Err(problem(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "No such conversation.",
+            ));
+        }
+        Err(_) => return Err(unavailable()),
+    };
+    // one writer at a time: never while a run holds the conversation
+    let lease = format!("undo-{}", Id::new_v7());
+    match state
+        .store
+        .lease(&conversation, &lease, now.as_millis() + 60_000, now)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(problem(
+                StatusCode::CONFLICT,
+                "busy",
+                "Ask AI is still working on this conversation; undo when it has finished.",
+            ));
+        }
+        Err(_) => return Err(unavailable()),
+    }
+    // the state as the last run saved it, still the active conversation
+    let fresh = match state
+        .store
+        .get_active(
+            conversation_id,
+            member.workspace_id,
+            member.user_id,
+            TimestampMillis::now(),
+        )
+        .await
+    {
+        Ok(Some(fresh)) => fresh,
+        _ => {
+            let _ = state.store.release(&conversation, &lease).await;
+            return Err(unavailable());
+        }
+    };
+    let principal = match principal(
+        &state.database,
+        member.workspace_id,
+        fresh.id,
+        member.user_id,
+    )
+    .await
+    {
+        Ok(principal) => principal,
+        Err(()) => {
+            let _ = state.store.release(&fresh, &lease).await;
+            return Err(unavailable());
+        }
+    };
+    let tools = SessionTools {
+        tools: state.tools.clone(),
+        principal,
+    };
+    let mut conversation_state = fresh.state.clone();
+    let results = {
+        let saver = LeaseSaver {
+            store: &state.store,
+            conversation: &fresh,
+            lease: &lease,
+        };
+        undo::undo(
+            &mut conversation_state,
+            &body.ids,
+            &tools,
+            &saver,
+            TimestampMillis::now().as_millis(),
+        )
+        .await
+    };
+    if let Err(error) = state
+        .store
+        .save(
+            &fresh,
+            &conversation_state,
+            &lease,
+            true,
+            TimestampMillis::now(),
+        )
+        .await
+    {
+        tracing::warn!(%error, "assistant conversation could not be saved after an undo");
+        // the conversation is not left held for the rest of the lease
+        let _ = state.store.release(&fresh, &lease).await;
+    }
+    let mut results = results;
+    for result in &mut results {
+        // an audit row for each undo tried on a task (not for a refusal from its stored state)
+        if result
+            .as_object_mut()
+            .and_then(|fields| fields.remove("attempted"))
+            .is_some()
+        {
+            let outcome = result["outcome"].as_str().unwrap_or("failed");
+            audit_undo(
+                state,
+                member.workspace_id,
+                member.user_id,
+                fresh.id,
+                outcome,
+            )
+            .await;
+        }
+    }
+    Ok(results)
+}
+
+struct UndoMember {
+    workspace_id: Id,
+    user_id: Id,
+}
+
+async fn audit_undo(
+    state: &AssistantState,
+    workspace_id: Id,
+    user_id: Id,
+    conversation_id: Id,
+    outcome: &str,
+) {
+    let result = async {
+        let mut transaction = state.database.workspace_transaction(workspace_id).await?;
+        audit::record(
+            &mut transaction,
+            workspace_id,
+            Some(user_id),
+            "assistant.undo",
+            if outcome == "undone" {
+                AuditOutcome::Success
+            } else {
+                AuditOutcome::Failure
+            },
+            "assistant_conversation",
+            Some(conversation_id),
+            REQUEST_ID,
+            json!({"outcome": outcome, "via": "assistant"}),
+            TimestampMillis::now(),
+        )
+        .await?;
+        transaction.commit().await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "assistant undo audit row could not be written");
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RunInput {
     thread_id: String,
@@ -740,11 +1048,30 @@ fn parse_input(input: &RunInput) -> Result<Input, &'static str> {
     if let Some(entry) = input.resume.first() {
         let interrupt_id = entry["interruptId"].as_str().unwrap_or_default().to_owned();
         let resolved = entry["status"] == "resolved";
+        // a batch answer names the server's item ids it approves; nothing else of the payload is read (never values)
+        let items = match &entry["payload"]["items"] {
+            Value::Null => None,
+            Value::Array(ids)
+                if ids.len() <= 50
+                    && ids.iter().all(|id| {
+                        id.as_str()
+                            .is_some_and(|id| !id.is_empty() && id.len() <= 64)
+                    }) =>
+            {
+                Some(
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(str::to_owned))
+                        .collect(),
+                )
+            }
+            _ => return Err("That approval could not be read; reload the conversation."),
+        };
         return Ok(Input::Resume {
             interrupt_id,
             approved: resolved && entry["payload"]["approved"] == true,
             allow_for_conversation: resolved
                 && entry["payload"]["reason"] == "allow_for_conversation",
+            items: if resolved { items } else { None },
         });
     }
     let last = input.messages.last().ok_or("Send a message.")?;

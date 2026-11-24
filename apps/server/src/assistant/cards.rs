@@ -634,7 +634,41 @@ pub(crate) fn change_entry(
     let href = card
         .and_then(|card| card["href"].as_str().map(str::to_owned))
         .or(href);
-    json!({"verb": verb, "key": key, "title": title, "href": href})
+    json!({"verb": verb, "key": key, "title": title, "href": href, "outcome": "applied"})
+}
+
+/// A line of the summary for a change of a batch that was not made: `failed` (with the error) or `skipped` (with the
+/// reason). Named from its (approved) arguments; no link, since nothing was made.
+pub(crate) fn outcome_entry(
+    tool: &str,
+    input: &Value,
+    subject: &Value,
+    outcome: &str,
+    note: &str,
+) -> Value {
+    let what = tool.replace('_', " ");
+    let mut chars = what.chars();
+    let verb = chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default();
+    let title = [&input["title"], &subject["title"], &input["name"]]
+        .into_iter()
+        .map(text)
+        .find(|title| !title.is_empty())
+        .unwrap_or_default();
+    let key = subject["key"]
+        .as_str()
+        .filter(|key| is_task_key(key))
+        .map_or(Value::Null, |key| json!(key));
+    json!({
+        "verb": verb,
+        "key": key,
+        "title": title,
+        "href": Value::Null,
+        "outcome": outcome,
+        "note": text(&json!(note)),
+    })
 }
 
 /// The panel's view of a result without a card: the view as it is, but never a `card` field of the tool's own
