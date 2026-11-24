@@ -213,7 +213,7 @@ chat is read-only there too. See [Orbit public REST API](public-api.md).
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `list_projects` | None | Approved live projects only. |
-| `list_tasks` | Optional `project_id`, `query`, `parent_task_id`, `milestone_id`, `cycle_id`, `cursor`, `limit` | Tasks and `next_cursor`. |
+| `list_tasks` | Optional `project_id`, `query`, `assignee_id`, `status_id`, `priority`, `due_before`, `due_after`, `has_due_date`, `parent_task_id`, `milestone_id`, `cycle_id`, `cursor`, `limit` | Tasks and `next_cursor`. |
 | `get_task` | Required `task_id` | One task in an approved project. |
 | `create_project` | Required `name`, `key`; optional `color` | The new project, with the default statuses. Needs task write and an all-projects connection. |
 | `list_task_statuses`, `list_labels` | Required `project_id`; optional `cursor`, `limit` | Statuses or labels (names, colors) of an approved project. |
@@ -247,6 +247,14 @@ keep the same project and search query.
 `milestone_id` takes a milestone ID, or `none` for tasks without a milestone. `cycle_id` takes a
 cycle ID; `current`, `next` or `previous` for that cycle of each task's project; or `none` for
 tasks without a cycle.
+`assignee_id` takes a member's user ID (from `list_members` or `get_me`); `me` for the member the
+connection acts for (Orbit resolves it from the connection, not from the request; a service account
+has no `me` and gets an error); or `none` for tasks without an assignee. `status_id` takes a status
+ID from `list_task_statuses`. `priority` is `none`, `low`, `medium`, `high` or `urgent`.
+`due_before` and `due_after` take a date (`2026-11-12`, 00:00 UTC) or a UTC time
+(`2026-11-12T15:00:00Z`) and match only tasks with a due date strictly before or after it;
+`has_due_date` is `true` for tasks with a due date and `false` for tasks without one. The filters
+combine (all must match). Keep the same filters when you follow `next_cursor`.
 
 The progress counts of milestones and cycles are `task_count`, `completed_count`,
 `estimate_total` and `estimate_completed`. They count live tasks; cancelled and duplicate tasks are

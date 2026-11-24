@@ -2998,6 +2998,141 @@ async fn assigned_to_me_lists_and_counts_only_the_members_own_tasks() {
     );
 }
 
+/// The other server-side filters of `list_tasks` (priority, due dates) list and count the same tasks, and `me` is an
+/// error for a service account, which acts for no member.
+#[tokio::test]
+async fn list_tasks_filters_priority_and_due_dates_on_the_server_and_counts_the_same_tasks() {
+    use crate::mcp::TaskTools;
+    use crate::repositories::api_tokens::ServiceAccount;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let tools = super::SessionTools {
+        tools: TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        principal: super::principal(&database, w.workspace, Id::new_v7(), w.owner)
+            .await
+            .unwrap(),
+    };
+    let statuses = tools
+        .call(
+            "list_task_statuses",
+            json!({"project_id": w.project.to_string()}),
+        )
+        .await
+        .unwrap();
+    let open = statuses["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|status| status["category"] == "unstarted")
+        .map(|status| status["id"].as_str().unwrap().to_owned())
+        .unwrap();
+    let tasks: [(&str, &str, Option<&str>); 5] = [
+        ("Urgent early", "urgent", Some("2026-11-10")),
+        ("Urgent late", "urgent", Some("2026-11-20")),
+        ("High early", "high", Some("2026-11-12")),
+        ("High undated", "high", None),
+        ("Low undated", "low", None),
+    ];
+    for (title, priority, due) in tasks {
+        tools
+            .call(
+                "create_task",
+                json!({"project_id": w.project.to_string(), "status_id": open, "title": title, "priority": priority, "due_at": due}),
+            )
+            .await
+            .unwrap();
+    }
+    let workspace = w.workspace;
+    for (input, expected) in [
+        (
+            json!({"priority": "urgent"}),
+            vec!["Urgent early", "Urgent late"],
+        ),
+        (
+            json!({"due_before": "2026-11-15"}),
+            vec!["High early", "Urgent early"],
+        ),
+        (
+            json!({"due_after": "2026-11-11T00:00:00Z"}),
+            vec!["High early", "Urgent late"],
+        ),
+        (
+            json!({"due_after": "2026-11-11", "due_before": "2026-11-15"}),
+            vec!["High early"],
+        ),
+        (
+            json!({"has_due_date": false}),
+            vec!["High undated", "Low undated"],
+        ),
+        (
+            json!({"has_due_date": true, "priority": "high"}),
+            vec!["High early"],
+        ),
+    ] {
+        let (titles, card, model) = listed_with_totals(&tools, input.clone(), workspace).await;
+        assert_eq!(titles, expected, "{input}");
+        assert_eq!(card["tasks"], expected.len(), "the count of {input}");
+        assert_eq!(card["complete"], true, "{input}");
+        assert_eq!(
+            model["tasks"],
+            expected.len(),
+            "the model's count of {input}"
+        );
+    }
+    // bad values are refused by the list and by the count
+    for input in [
+        json!({"priority": "whenever"}),
+        json!({"due_before": "next week"}),
+        json!({"status_id": "not-an-id"}),
+    ] {
+        assert!(
+            tools.call("list_tasks", input.clone()).await.is_err(),
+            "{input}"
+        );
+        assert!(
+            tools
+                .lookup(super::cards::COUNT_TASKS, input.clone())
+                .await
+                .is_err(),
+            "{input}"
+        );
+    }
+    // a service account acts for no member: `me` is a clear error, a user id still works
+    let mut principal = tools.principal.clone();
+    principal.service_account = Some(ServiceAccount {
+        id: Id::new_v7(),
+        name: "Robot".into(),
+    });
+    let robot = super::SessionTools {
+        tools: TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        principal,
+    };
+    let error = robot
+        .call("list_tasks", json!({"assignee_id": "me"}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("service account has no `me`"), "{error}");
+    let error = robot
+        .lookup(super::cards::COUNT_TASKS, json!({"assignee_id": "me"}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("service account has no `me`"), "{error}");
+    assert!(
+        robot
+            .call("list_tasks", json!({"assignee_id": w.owner.to_string()}))
+            .await
+            .is_ok()
+    );
+}
+
 /// The sorted titles a `list_tasks` call lists, with its card's totals and the totals the model gets.
 async fn listed_with_totals(
     tools: &super::SessionTools,
