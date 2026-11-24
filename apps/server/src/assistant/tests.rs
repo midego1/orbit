@@ -192,6 +192,8 @@ struct FakeTools {
     results: Mutex<std::collections::HashMap<String, Value>>,
     /// The rows of the server's own task count (`count_tasks`); none: the count fails.
     counts: Mutex<Option<Value>>,
+    /// Calls whose `title` is one of these fail, as a refused change would.
+    fail_titles: Mutex<Vec<String>>,
 }
 
 impl ToolRunner for FakeTools {
@@ -201,6 +203,11 @@ impl ToolRunner for FakeTools {
                 .lock()
                 .unwrap()
                 .push((name.to_owned(), input.clone()));
+            if let Some(title) = input["title"].as_str()
+                && self.fail_titles.lock().unwrap().iter().any(|t| t == title)
+            {
+                return Err("Task resource is not available".into());
+            }
             if let Some(result) = self.results.lock().unwrap().get(name) {
                 return Ok(result.clone());
             }
@@ -268,7 +275,7 @@ impl ToolRunner for FakeTools {
 fn fake_task(id: &str, number: i64, title: &str, status: &str) -> Value {
     json!({
         "id": id, "project_id": "p1", "status_id": status, "number": number, "identifier": format!("LCH-{number}"),
-        "title": title, "priority": "high", "assignee_ids": ["u1"], "due_at": "2026-11-30T00:00:00.000Z",
+        "title": title, "priority": "high", "assignee_ids": ["u1"], "due_at": "2026-11-30T00:00:00.000Z", "version": 3,
         "url": format!("https://orbit.test/tasks/{id}?workspace=w"),
     })
 }
@@ -549,6 +556,7 @@ async fn a_write_waits_for_approval_and_runs_the_stored_arguments() {
                 interrupt_id: pending.interrupt_id.clone(),
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -605,6 +613,7 @@ async fn a_declined_write_does_not_run_and_the_model_is_told_not_to_retry() {
                 interrupt_id,
                 approved: false,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -662,6 +671,7 @@ async fn allowing_a_write_for_the_conversation_skips_later_approvals_but_not_dan
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -699,6 +709,7 @@ async fn an_unknown_approval_is_refused_and_an_expired_one_does_not_run() {
                 interrupt_id: "approve:someone-else".into(),
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -714,6 +725,7 @@ async fn an_unknown_approval_is_refused_and_an_expired_one_does_not_run() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -1602,6 +1614,7 @@ async fn a_runs_context_mentions_are_parsed_resolved_and_attached_to_its_message
         interrupt_id: "i".into(),
         approved: true,
         allow_for_conversation: false,
+        items: None,
     };
     mentions::attach(
         &mut resume,
@@ -1852,6 +1865,7 @@ async fn an_approval_is_used_up_and_saved_before_its_write_runs() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -2020,6 +2034,7 @@ async fn an_allowed_change_with_a_link_asks_again_and_one_without_does_not_move_
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -2164,6 +2179,7 @@ async fn a_free_text_change_always_shows_its_card_even_when_allowed() {
                     interrupt_id,
                     approved: true,
                     allow_for_conversation: true,
+                    items: None,
                 },
             )
             .await;
@@ -2203,6 +2219,7 @@ async fn after_a_change_without_a_card_no_page_opens_in_that_message() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: true,
+                items: None,
             },
         )
         .await;
@@ -2513,6 +2530,7 @@ async fn an_update_shows_the_current_value_read_by_the_server_next_to_the_new_on
                 interrupt_id: pending.interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -4026,6 +4044,7 @@ async fn an_approval_of_a_chat_switched_away_from_can_never_be_applied() {
                 interrupt_id,
                 approved: true,
                 allow_for_conversation: false,
+                items: None,
             },
         )
         .await;
@@ -4637,4 +4656,1612 @@ async fn deleting_an_account_removes_only_that_users_conversations() {
         .await
         .unwrap();
     assert_eq!(left, [w.owner.to_string()]);
+}
+
+// ---- batches of changes (`propose_changes`) ----
+
+fn batch_of(changes: Vec<(&str, Value)>) -> Value {
+    json!({"changes": changes.into_iter().map(|(tool, input)| json!({"tool": tool, "input": input})).collect::<Vec<_>>()})
+}
+
+fn creates(titles: &[&str]) -> Value {
+    batch_of(
+        titles
+            .iter()
+            .map(|title| {
+                (
+                    "create_task",
+                    json!({"project_id": "p1", "status_id": "s-todo", "title": title}),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn answer(state: &ConversationState, approved: bool, items: Option<&[&str]>) -> Input {
+    Input::Resume {
+        interrupt_id: state.pending.as_ref().unwrap().interrupt_id.clone(),
+        approved,
+        allow_for_conversation: false,
+        items: items.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
+    }
+}
+
+fn summary_changes(events: &[Value]) -> Vec<Value> {
+    let start = events
+        .iter()
+        .find(|event| {
+            event["type"] == "TOOL_CALL_START"
+                && event["toolCallName"] == super::cards::SUMMARY_TOOL
+        })
+        .expect("a summary step");
+    let content = tool_result_content(events, start["toolCallId"].as_str().unwrap());
+    content["card"]["changes"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn a_batch_waits_as_one_approval_with_a_card_per_change() {
+    let batch = batch_of(vec![
+        (
+            "create_task",
+            json!({"project_id": "p1", "status_id": "s-todo", "title": "One", "assignee_ids": ["u2"]}),
+        ),
+        (
+            "create_task",
+            json!({"project_id": "p1", "status_id": "s-todo", "title": "Two", "description": "```\nfence\n```"}),
+        ),
+        (
+            "update_task",
+            json!({"task_id": "t7", "expected_version": 3, "status_id": "s-done"}),
+        ),
+    ]);
+    let harness = Harness::new(vec![tool("toolu_b", "propose_changes", &batch)]).await;
+    let mut state = state();
+    let (outcome, events) = harness.run(&mut state, ask("plan the launch")).await;
+    assert_eq!(outcome, Outcome::Paused);
+    assert!(
+        harness.tools.names().is_empty(),
+        "nothing runs before approval"
+    );
+    let interrupt = &events.last().unwrap()["outcome"]["interrupts"][0];
+    assert_eq!(interrupt["toolCallId"], "toolu_b");
+    assert_eq!(interrupt["message"], "Make 3 changes?");
+    let metadata = &interrupt["metadata"];
+    // never "Allow in this chat" for a batch
+    assert_eq!(metadata["allowForConversation"], false);
+    assert_eq!(
+        metadata["risk"], "dangerous",
+        "the update is destructive in MCP"
+    );
+    let items = metadata["batch"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["c1", "c2", "c3"]
+    );
+    // each card: the stored arguments and the server's preview, values resolved now
+    assert_eq!(items[0]["args"]["title"], "One");
+    assert_eq!(items[0]["preview"]["kind"], "create");
+    assert_eq!(
+        items[0]["preview"]["task"]["assignees"][0]["name"],
+        "Grace Hopper"
+    );
+    // only a change that writes rich text is marked as such
+    assert_eq!(items[0]["freeText"], false);
+    assert_eq!(items[1]["freeText"], true);
+    assert_eq!(items[2]["preview"]["kind"], "change");
+    assert_eq!(items[2]["preview"]["changes"][0]["before"], "Todo");
+    assert_eq!(items[2]["preview"]["changes"][0]["after"], "Done");
+    // the batch is kept server-side with its exact arguments
+    let pending = state.pending.clone().unwrap();
+    let stored = pending.batch.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[1].input["description"], "```\nfence\n```");
+    assert_eq!(stored[2].tool, "update_task");
+}
+
+#[tokio::test]
+async fn only_the_approved_items_of_a_batch_run_in_the_batch_order() {
+    let harness = Harness::new(vec![
+        tool(
+            "toolu_b",
+            "propose_changes",
+            &creates(&["One", "Two", "Three", "Four"]),
+        ),
+        text("Made two of them."),
+    ])
+    .await;
+    let mut state = state();
+    harness.run(&mut state, ask("four tasks")).await;
+    let answer_0 = answer(&state, true, Some(&["c3", "c1"]));
+    // out of order on purpose: the batch's order counts
+    let (outcome, events) = harness.run(&mut state, answer_0).await;
+    assert_eq!(outcome, Outcome::Finished);
+    let calls = harness.tools.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(name, input)| format!("{name}:{}", input["title"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        ["create_task:One", "create_task:Three"]
+    );
+    assert!(state.pending.is_none());
+    assert_eq!(
+        *harness.hooks.audits.lock().unwrap(),
+        vec![
+            ("create_task".to_owned(), "applied".to_owned()),
+            ("create_task".to_owned(), "applied".to_owned())
+        ]
+    );
+    // the panel's step: what happened to each
+    let result = tool_result_content(&events, "toolu_b");
+    assert_eq!(result["batch"]["applied"], 2);
+    assert_eq!(result["batch"]["skipped"], 2);
+    assert_eq!(result["batch"]["items"][1]["outcome"], "skipped");
+    assert_eq!(
+        result["batch"]["items"][1]["reason"],
+        "not selected by the user"
+    );
+    // the model is told per item, and not to make the unselected ones
+    let told = last_tool_result(&harness.fake.requests()[1]);
+    let told = told["content"].as_str().unwrap();
+    assert!(told.contains("c1 create_task: applied"));
+    assert!(told.contains("c2 create_task: NOT run (not selected by the user)"));
+    assert!(told.contains("Do not make the changes the user did not select"));
+    assert!(
+        told.contains("<untrusted-data-n0nce"),
+        "tool output stays wrapped"
+    );
+    // the summary lists applied and skipped changes; no page moved for a batch
+    let changes = summary_changes(&events);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| c["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["applied", "skipped", "applied", "skipped"]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["toolCallName"] == "navigate"),
+        "a batch does not move the page per change"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_answer_that_does_not_fit_the_waiting_batch_runs_nothing() {
+    let harness = Harness::new(vec![
+        tool("toolu_b", "propose_changes", &creates(&["One", "Two"])),
+        text("Done."),
+    ])
+    .await;
+    let mut state = state();
+    harness.run(&mut state, ask("two tasks")).await;
+    for ids in [
+        Some(vec!["c1", "c9"]),
+        Some(vec!["c1", "c1"]),
+        Some(vec![]),
+        Some(vec!["approve:toolu_b"]),
+        None,
+    ] {
+        let answer_1 = answer(&state, true, ids.as_deref());
+        let (outcome, events) = harness.run(&mut state, answer_1).await;
+        assert_eq!(outcome, Outcome::Rejected, "{ids:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "RUN_ERROR" && event["code"] == "invalid_selection"),
+            "{ids:?}"
+        );
+        assert!(state.pending.is_some(), "the batch still waits");
+    }
+    // the wrong interrupt id
+    let (outcome, _) = harness
+        .run(
+            &mut state,
+            Input::Resume {
+                interrupt_id: "approve:other".into(),
+                approved: true,
+                allow_for_conversation: false,
+                items: Some(vec!["c1".into()]),
+            },
+        )
+        .await;
+    assert_eq!(outcome, Outcome::Rejected);
+    assert!(harness.tools.names().is_empty(), "nothing ran");
+    // a valid answer still works and runs the stored arguments, not anything the client sent
+    let input = super::RunInput {
+        thread_id: "t".into(),
+        run_id: "r".into(),
+        messages: vec![],
+        resume: vec![json!({
+            "interruptId": state.pending.as_ref().unwrap().interrupt_id,
+            "status": "resolved",
+            "payload": {"approved": true, "items": ["c2"], "args": {"title": "Evil"}, "changes": [{"tool": "create_task", "input": {"title": "Evil"}}]},
+        })],
+        context: vec![],
+    };
+    let parsed = super::parse_input(&input).unwrap();
+    let (outcome, _) = harness.run(&mut state, parsed).await;
+    assert_eq!(outcome, Outcome::Finished);
+    let calls = harness.tools.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1["title"], "Two");
+    // a payload whose items are not a list of ids is refused outright
+    let bad = super::RunInput {
+        thread_id: "t".into(),
+        run_id: "r".into(),
+        messages: vec![],
+        resume: vec![
+            json!({"interruptId": "x", "status": "resolved", "payload": {"approved": true, "items": [{"id": "c1", "input": {}}]}}),
+        ],
+        context: vec![],
+    };
+    assert!(super::parse_input(&bad).is_err());
+}
+
+#[tokio::test]
+async fn items_on_a_single_approval_are_refused() {
+    let harness = Harness::new(vec![tool(
+        "toolu_w",
+        "create_task",
+        &json!({"project_id": "p1", "status_id": "s-todo", "title": "X"}),
+    )])
+    .await;
+    let mut state = state();
+    harness.run(&mut state, ask("create X")).await;
+    let answer_2 = answer(&state, true, Some(&["c1"]));
+    let (outcome, _) = harness.run(&mut state, answer_2).await;
+    assert_eq!(outcome, Outcome::Rejected);
+    assert!(harness.tools.names().is_empty());
+    assert!(state.pending.is_some());
+}
+
+#[tokio::test]
+async fn a_batch_stops_at_the_first_failure_and_reports_every_item() {
+    let harness = Harness::new(vec![
+        tool(
+            "toolu_b",
+            "propose_changes",
+            &creates(&["One", "Refused", "Three", "Four"]),
+        ),
+        text("One was made; the second failed."),
+    ])
+    .await;
+    harness
+        .tools
+        .fail_titles
+        .lock()
+        .unwrap()
+        .push("Refused".into());
+    let mut state = state();
+    harness.run(&mut state, ask("four tasks")).await;
+    let answer_3 = answer(&state, true, Some(&["c1", "c2", "c3"]));
+    let (outcome, events) = harness.run(&mut state, answer_3).await;
+    assert_eq!(outcome, Outcome::Finished);
+    // the third was approved but not run after the failure
+    assert_eq!(harness.tools.names(), ["create_task", "create_task"]);
+    assert_eq!(
+        *harness.hooks.audits.lock().unwrap(),
+        vec![
+            ("create_task".to_owned(), "applied".to_owned()),
+            ("create_task".to_owned(), "failed".to_owned())
+        ]
+    );
+    let result = tool_result_content(&events, "toolu_b");
+    assert_eq!(result["batch"]["applied"], 1);
+    assert_eq!(result["batch"]["failed"], 1);
+    assert_eq!(result["batch"]["skipped"], 2);
+    assert_eq!(
+        result["batch"]["items"][1]["error"],
+        "Task resource is not available"
+    );
+    assert_eq!(
+        result["batch"]["items"][2]["reason"],
+        "an earlier change of the batch failed"
+    );
+    let changes = summary_changes(&events);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| c["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["applied", "failed", "skipped", "skipped"]
+    );
+    assert_eq!(changes[1]["note"], "Task resource is not available");
+    assert_eq!(changes[3]["note"], "not selected by the user");
+    let told = last_tool_result(&harness.fake.requests()[1]);
+    let told = told["content"].as_str().unwrap();
+    assert!(told.contains("c2 create_task: FAILED"));
+    assert!(told.contains("c3 create_task: NOT run (an earlier change of the batch failed)"));
+}
+
+#[tokio::test]
+async fn a_batch_holds_only_changes_the_model_may_make_now() {
+    let cases = [
+        batch_of(vec![(
+            "delete_task",
+            json!({"task_id": "t1", "expected_version": 1}),
+        )]),
+        batch_of(vec![("get_task", json!({"task_id": "t1"}))]),
+        // loadable, not loaded
+        batch_of(vec![(
+            "update_doc",
+            json!({"page_id": "d1", "expected_version": 1, "markdown": "x"}),
+        )]),
+        batch_of(vec![("propose_changes", json!({"changes": []}))]),
+        batch_of(vec![("create_task", json!("not an object"))]),
+        creates(&["x"; 21]),
+        json!({"changes": []}),
+    ];
+    for case in cases {
+        let harness = Harness::new(vec![
+            tool("toolu_b", "propose_changes", &case),
+            text("I could not."),
+        ])
+        .await;
+        let mut state = state();
+        let (outcome, _) = harness.run(&mut state, ask("do it")).await;
+        assert_eq!(outcome, Outcome::Finished, "{case}");
+        assert!(state.pending.is_none(), "{case}: never shown to the user");
+        assert!(harness.tools.names().is_empty(), "{case}");
+        let told = last_tool_result(&harness.fake.requests()[1]);
+        assert_eq!(told["is_error"], true, "{case}");
+        assert!(
+            told["content"].as_str().unwrap().starts_with("Not run"),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_declined_batch_runs_nothing_and_an_allowed_tool_still_waits_in_a_batch() {
+    let batch = batch_of(vec![
+        (
+            "update_project",
+            json!({"project_id": "p1", "expected_version": 1, "name": "A"}),
+        ),
+        (
+            "update_project",
+            json!({"project_id": "p1", "expected_version": 2, "name": "B"}),
+        ),
+    ]);
+    let harness = Harness::new(vec![
+        tool("toolu_b", "propose_changes", &batch),
+        text("OK, nothing changed."),
+    ])
+    .await;
+    let mut state = state();
+    // the user allowed update_project for the chat earlier: a batch still asks
+    state.allowed_tools.insert("update_project".into());
+    state.loaded_tools.insert("update_project".into());
+    let (outcome, _) = harness.run(&mut state, ask("rename twice")).await;
+    assert_eq!(outcome, Outcome::Paused);
+    let interrupt_id = state.pending.as_ref().unwrap().interrupt_id.clone();
+    let (outcome, _) = harness
+        .run(
+            &mut state,
+            Input::Resume {
+                interrupt_id,
+                approved: false,
+                // "allow for this chat" means nothing for a batch
+                allow_for_conversation: true,
+                items: None,
+            },
+        )
+        .await;
+    assert_eq!(outcome, Outcome::Finished);
+    assert!(harness.tools.names().is_empty());
+    assert_eq!(harness.hooks.audits.lock().unwrap().len(), 2);
+    let told = last_tool_result(&harness.fake.requests()[1]);
+    assert!(
+        told["content"]
+            .as_str()
+            .unwrap()
+            .contains("NONE of its changes")
+    );
+}
+
+#[tokio::test]
+async fn an_expired_batch_runs_nothing() {
+    let harness = Harness::new(vec![
+        tool("toolu_b", "propose_changes", &creates(&["One"])),
+        text("It expired."),
+    ])
+    .await;
+    let mut state = state();
+    harness.run(&mut state, ask("one")).await;
+    state.pending.as_mut().unwrap().expires_at = 0;
+    let answer_4 = answer(&state, true, Some(&["c1"]));
+    harness.run(&mut state, answer_4).await;
+    assert!(harness.tools.names().is_empty());
+    assert!(
+        last_tool_result(&harness.fake.requests()[1])["content"]
+            .as_str()
+            .unwrap()
+            .contains("expired")
+    );
+}
+
+// ---- undo ----
+
+#[test]
+fn an_update_is_recorded_for_undo_only_when_its_before_state_is_exact_and_restorable() {
+    let before = json!({"id": "t1", "version": 3, "title": "Old", "status_id": "s1", "recurrence": null, "due_at": null});
+    let after = json!({"id": "t1", "version": 4, "title": "New"});
+    let input =
+        json!({"task_id": "t1", "expected_version": 3, "title": "New", "due_at": "2026-12-01"});
+    let record = super::undo::record_update(&input, &before, &after, Some("LCH-1"), 1000).unwrap();
+    assert_eq!(record.restore, json!({"title": "Old", "due_at": null}));
+    assert_eq!((record.before_version, record.after_version), (Some(3), 4));
+    assert_eq!(record.expires_at, 1000 + super::undo::UNDO_TTL_MS);
+    // the read was of another version than the update's: not exact
+    let stale = json!({"task_id": "t1", "expected_version": 2, "title": "New"});
+    assert!(super::undo::record_update(&stale, &before, &after, None, 0).is_none());
+    // a change an undo cannot reverse
+    for field in ["parent_task_id", "recurrence", "duplicate_of_id"] {
+        let mut input = json!({"task_id": "t1", "expected_version": 3});
+        input[field] = Value::Null;
+        assert!(
+            super::undo::record_update(&input, &before, &after, None, 0).is_none(),
+            "{field}"
+        );
+    }
+    // completing a recurring task makes the next one
+    let recurring =
+        json!({"id": "t1", "version": 3, "status_id": "s1", "recurrence": {"frequency": "weekly"}});
+    let done = json!({"task_id": "t1", "expected_version": 3, "status_id": "s2"});
+    assert!(super::undo::record_update(&done, &recurring, &after, None, 0).is_none());
+    // a key that is not a key is not kept
+    let created = json!({"id": "t9", "version": 1});
+    assert_eq!(
+        super::undo::record_create(&created, Some("<b>x</b>"), 0)
+            .unwrap()
+            .key,
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_applied_update_records_its_undo_from_the_task_read_right_before() {
+    let harness = Harness::new(vec![
+        tool(
+            "toolu_u",
+            "update_task",
+            &json!({"task_id": "t7", "expected_version": 3, "title": "Renamed", "priority": "low"}),
+        ),
+        text("Renamed."),
+    ])
+    .await;
+    harness.tools.results.lock().unwrap().insert(
+        "update_task".into(),
+        json!({"id": "t7", "identifier": "LCH-7", "project_id": "p1", "title": "Renamed", "version": 4}),
+    );
+    let mut state = state();
+    harness.run(&mut state, ask("rename LCH-7")).await;
+    // the server's own read of the task right before the update (its version is the update's expected_version)
+    harness.tools.lookups.lock().unwrap().clear();
+    let answer_5 = answer(&state, true, None);
+    let (_, events) = harness.run(&mut state, answer_5).await;
+    assert!(
+        harness
+            .tools
+            .lookups
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, input)| name == "get_task" && input["task_id"] == "t7")
+    );
+    assert_eq!(state.undo.len(), 1);
+    let record = &state.undo[0];
+    assert_eq!(record.tool, "update_task");
+    assert_eq!(record.key.as_deref(), Some("LCH-7"));
+    assert_eq!(
+        record.restore,
+        json!({"title": "Write the launch post", "priority": "high"})
+    );
+    assert_eq!(record.after_version, 4);
+    let changes = summary_changes(&events);
+    assert_eq!(changes[0]["undo"]["id"], json!(record.id));
+    assert_eq!(changes[0]["undo"]["state"], "available");
+}
+
+/// Tasks with versions, as the real tools keep them: an update or delete with a stale `expected_version` fails.
+#[derive(Default)]
+struct VersionedTasks {
+    tasks: Mutex<std::collections::HashMap<String, Value>>,
+    calls: Mutex<Vec<(String, Value)>>,
+    /// Trashed tasks, with the sub-issues that went with them.
+    trash: Mutex<std::collections::HashMap<String, Value>>,
+    /// A sub-issue appears right after the check, before the delete (the race the recheck closes).
+    sub_issue_sneaks_in: bool,
+}
+
+impl ToolRunner for VersionedTasks {
+    fn call<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), input.clone()));
+            let mut tasks = self.tasks.lock().unwrap();
+            let id = input["task_id"].as_str().unwrap_or_default().to_owned();
+            if name == "restore_task" {
+                let mut trashed = self
+                    .trash
+                    .lock()
+                    .unwrap()
+                    .remove(&id)
+                    .ok_or("not in the trash")?;
+                trashed["version"] = json!(trashed["version"].as_u64().unwrap() + 1);
+                tasks.insert(id, trashed.clone());
+                return Ok(trashed);
+            }
+            let Some(task) = tasks.get_mut(&id) else {
+                return Err("Task resource is not available".into());
+            };
+            if task["version"] != input["expected_version"] {
+                return Err("The version changed; read it again before retrying".into());
+            }
+            match name {
+                "update_task" => {
+                    for (key, value) in input.as_object().unwrap() {
+                        if key != "task_id" && key != "expected_version" {
+                            task[key] = value.clone();
+                        }
+                    }
+                    task["version"] = json!(task["version"].as_u64().unwrap() + 1);
+                    Ok(task.clone())
+                }
+                "delete_task" => {
+                    let mut trashed = tasks.remove(&id).unwrap();
+                    trashed["trashed_descendant_count"] =
+                        json!(i64::from(self.sub_issue_sneaks_in));
+                    self.trash.lock().unwrap().insert(id, trashed);
+                    Ok(json!({"deleted": true}))
+                }
+                _ => Err("unknown".into()),
+            }
+        })
+    }
+
+    fn lookup<'a>(&'a self, name: &'a str, input: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            match name {
+                "get_task" => self
+                    .tasks
+                    .lock()
+                    .unwrap()
+                    .get(input["task_id"].as_str().unwrap_or_default())
+                    .cloned()
+                    .ok_or_else(|| "Task resource is not available".into()),
+                "list_tasks" => Ok(json!({"items": []})),
+                "list_task_trash" => Ok(json!({
+                    "items": self.trash.lock().unwrap().values().cloned().collect::<Vec<_>>(),
+                    "next_cursor": null,
+                })),
+                _ => Err("unknown".into()),
+            }
+        })
+    }
+}
+
+struct Saves {
+    ok: bool,
+    count: Mutex<u32>,
+}
+
+impl super::undo::UndoSaver for Saves {
+    fn save<'a>(&'a self, state: &'a ConversationState) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            // the record is marked before its effect
+            assert!(
+                state
+                    .undo
+                    .iter()
+                    .any(|record| record.state == super::store::UndoState::Undoing)
+            );
+            *self.count.lock().unwrap() += 1;
+            self.ok
+        })
+    }
+}
+
+fn record(
+    id: &str,
+    tool: &str,
+    task: &str,
+    before: Option<u64>,
+    after: u64,
+    restore: Value,
+) -> super::store::UndoRecord {
+    super::store::UndoRecord {
+        id: id.into(),
+        tool: tool.into(),
+        task_id: task.into(),
+        key: Some("LCH-1".into()),
+        before_version: before,
+        after_version: after,
+        restore,
+        created_at: 0,
+        expires_at: i64::MAX,
+        state: super::store::UndoState::Available,
+        undone_version: None,
+    }
+}
+
+fn outcomes(results: &[Value]) -> Vec<(String, String)> {
+    results
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_owned(),
+                r["outcome"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn undo_takes_back_two_changes_to_one_task_newest_first_and_only_once() {
+    use super::undo::undo;
+    // Ask AI created t1 (version 1), then renamed it (version 2)
+    let tools = VersionedTasks::default();
+    tools.tasks.lock().unwrap().insert(
+        "t1".into(),
+        json!({"id": "t1", "version": 2, "title": "Renamed", "recurrence": null}),
+    );
+    let mut state = state();
+    state.undo = vec![
+        record("u-create", "create_task", "t1", None, 1, Value::Null),
+        record(
+            "u-rename",
+            "update_task",
+            "t1",
+            Some(1),
+            2,
+            json!({"title": "First"}),
+        ),
+    ];
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    // the older change alone: the later one is still in place
+    let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("undo that later change first")
+    );
+    assert!(tools.calls.lock().unwrap().is_empty());
+    // Undo all: the rename first (title back), then the create (to the trash), in one request
+    let results = undo(
+        &mut state,
+        &["u-create".into(), "u-rename".into()],
+        &tools,
+        &saves,
+        10,
+    )
+    .await;
+    assert_eq!(
+        outcomes(&results),
+        [
+            ("u-create".into(), "undone".into()),
+            ("u-rename".into(), "undone".into())
+        ]
+    );
+    let calls = tools.calls.lock().unwrap().clone();
+    assert_eq!(calls[0].0, "update_task");
+    assert_eq!(
+        calls[0].1,
+        json!({"task_id": "t1", "expected_version": 2, "title": "First"})
+    );
+    assert_eq!(
+        calls[1],
+        (
+            "delete_task".into(),
+            json!({"task_id": "t1", "expected_version": 3, "permanent": false})
+        )
+    );
+    assert!(tools.tasks.lock().unwrap().is_empty());
+    assert_eq!(*saves.count.lock().unwrap(), 2);
+    // once only
+    let results = undo(
+        &mut state,
+        &["u-rename".into(), "nope".into()],
+        &tools,
+        &saves,
+        10,
+    )
+    .await;
+    assert_eq!(
+        outcomes(&results),
+        [
+            ("u-rename".into(), "already_undone".into()),
+            ("nope".into(), "not_found".into())
+        ]
+    );
+    assert_eq!(tools.calls.lock().unwrap().len(), 2);
+    // the model hears about it with the next message
+    assert_eq!(state.notes.len(), 1);
+    assert!(state.notes[0].contains("LCH-1"));
+}
+
+#[tokio::test]
+async fn undo_refuses_a_task_changed_since_an_expired_record_and_an_unsaved_state() {
+    use super::undo::undo;
+    let tools = VersionedTasks::default();
+    // someone edited t1 after Ask AI's update left it at version 5
+    tools.tasks.lock().unwrap().insert(
+        "t1".into(),
+        json!({"id": "t1", "version": 6, "title": "Edited by a person"}),
+    );
+    tools.tasks.lock().unwrap().insert(
+        "t2".into(),
+        json!({"id": "t2", "version": 2, "title": "Two"}),
+    );
+    let mut state = state();
+    let mut old = record(
+        "u-old",
+        "update_task",
+        "t2",
+        Some(1),
+        2,
+        json!({"title": "One"}),
+    );
+    old.expires_at = 5;
+    state.undo = vec![
+        record(
+            "u-edit",
+            "update_task",
+            "t1",
+            Some(4),
+            5,
+            json!({"title": "Before"}),
+        ),
+        old,
+    ];
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    let results = undo(
+        &mut state,
+        &["u-edit".into(), "u-old".into()],
+        &tools,
+        &saves,
+        10,
+    )
+    .await;
+    assert_eq!(
+        outcomes(&results),
+        [
+            ("u-edit".into(), "conflict".into()),
+            ("u-old".into(), "expired".into())
+        ]
+    );
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was changed after Ask AI's change")
+    );
+    assert!(tools.calls.lock().unwrap().is_empty(), "nothing written");
+    assert_eq!(
+        tools.tasks.lock().unwrap()["t1"]["title"],
+        "Edited by a person"
+    );
+    // a conflict is final
+    assert_eq!(state.undo[0].state, super::store::UndoState::Conflict);
+    // when the state cannot be saved first, nothing is undone and the record stays available
+    let mut state = state_with(vec![record(
+        "u-2",
+        "update_task",
+        "t2",
+        Some(1),
+        2,
+        json!({"title": "One"}),
+    )]);
+    let failing = Saves {
+        ok: false,
+        count: Mutex::new(0),
+    };
+    let results = undo(&mut state, &["u-2".into()], &tools, &failing, 10).await;
+    assert_eq!(outcomes(&results), [("u-2".into(), "failed".into())]);
+    assert_eq!(state.undo[0].state, super::store::UndoState::Available);
+    assert!(tools.calls.lock().unwrap().is_empty());
+}
+
+fn state_with(records: Vec<super::store::UndoRecord>) -> ConversationState {
+    let mut state = state();
+    state.undo = records;
+    state
+}
+
+#[tokio::test]
+async fn an_undo_note_reaches_the_model_with_the_next_message_only() {
+    let harness = Harness::new(vec![text("Noted."), text("Hello.")]).await;
+    let mut state = state();
+    state.notes.push(
+        "The user undid these changes you made earlier in this conversation: update of LCH-1."
+            .into(),
+    );
+    harness.run(&mut state, ask("what now?")).await;
+    harness.run(&mut state, ask("and now?")).await;
+    let requests = harness.fake.requests();
+    let first = requests[0]["messages"].to_string();
+    assert!(first.contains("<orbit-note>The user undid"));
+    let second_user = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(!second_user.contains("orbit-note"));
+    assert!(state.notes.is_empty());
+}
+
+// ---- batches and undo with the real tools on a test database ----
+
+/// Runs the loop with any tools (the real ones here) against the fake model.
+async fn drive<T: ToolRunner>(
+    base: &str,
+    tools: &T,
+    hooks: &FakeHooks,
+    workspace: Id,
+    state: &mut ConversationState,
+    input: Input,
+) -> (Outcome, Vec<Value>) {
+    let provider = AnthropicProvider::new(
+        reqwest::Client::new(),
+        base,
+        "sk-ant-good-key-000000".into(),
+    );
+    let (sender, mut receiver) = mpsc::channel(4096);
+    let emitter = Emitter::new(sender);
+    let registry = Registry::new();
+    let engine = Engine {
+        provider: &provider,
+        tools,
+        hooks,
+        registry: &registry,
+        model: "claude-sonnet-5-5",
+        system: "system",
+        workspace_id: workspace,
+        thread_id: "thread",
+        run_id: "run",
+        out: &emitter,
+        cancel: CancellationToken::new(),
+        limits: Limits {
+            run_time: Duration::from_secs(20),
+            ..Limits::default()
+        },
+        follow_along: true,
+        names: super::cards::Names::default(),
+    };
+    let outcome = engine.run(state, input).await;
+    drop(engine);
+    drop(emitter);
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        events.push(event);
+    }
+    (outcome, events)
+}
+
+async fn session_tools_for(
+    database: &orbit_platform::Database,
+    workspace: Id,
+    conversation: Id,
+    user: Id,
+) -> super::SessionTools {
+    use crate::mcp::TaskTools;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    super::SessionTools {
+        tools: TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        principal: super::principal(database, workspace, conversation, user)
+            .await
+            .unwrap(),
+    }
+}
+
+async fn first_status(tools: &super::SessionTools, project: &str) -> String {
+    let statuses = tools
+        .call("list_task_statuses", json!({"project_id": project}))
+        .await
+        .unwrap();
+    statuses["items"][0]["id"]
+        .as_str()
+        .expect("a status")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn each_item_of_a_batch_is_checked_with_the_members_own_access() {
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let conversation = Id::new_v7();
+    let owner = session_tools_for(&database, w.workspace, conversation, w.owner).await;
+    // a private project the plain member is not in, with a task the owner made
+    let secret = owner
+        .call("create_project", json!({"name": "Secret", "key": "SEC"}))
+        .await
+        .unwrap();
+    let secret_id = secret["id"].as_str().unwrap().to_owned();
+    sqlx::query("UPDATE projects SET private = 1 WHERE id = $1")
+        .bind(&secret_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    // a principal lists the projects it sees when it is made
+    let owner = session_tools_for(&database, w.workspace, conversation, w.owner).await;
+    let secret_status = first_status(&owner, &secret_id).await;
+    let hidden = owner
+        .call(
+            "create_task",
+            json!({"project_id": secret_id, "status_id": secret_status, "title": "Secret plan"}),
+        )
+        .await
+        .unwrap();
+    let member = session_tools_for(&database, w.workspace, conversation, w.member).await;
+    let project = w.project.to_string();
+    let status = first_status(&member, &project).await;
+    let batch = batch_of(vec![
+        (
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "Mine"}),
+        ),
+        (
+            "update_task",
+            json!({"task_id": hidden["id"], "expected_version": hidden["version"], "title": "Taken over"}),
+        ),
+        (
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "After"}),
+        ),
+    ]);
+    let (base, _fake) = fake_server(vec![
+        tool("toolu_b", "propose_changes", &batch),
+        text("Some of it."),
+    ])
+    .await;
+    let hooks = FakeHooks::new(super::settings::Gate::Open);
+    let mut state = state();
+    let (outcome, events) = drive(
+        &base,
+        &member,
+        &hooks,
+        w.workspace,
+        &mut state,
+        ask("three changes"),
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Paused);
+    // the preview of the hidden task is read as the member too: none
+    let items =
+        events.last().unwrap()["outcome"]["interrupts"][0]["metadata"]["batch"]["items"].clone();
+    assert!(items[1].get("preview").is_none());
+    let answer_6 = answer(&state, true, Some(&["c1", "c2", "c3"]));
+    let (outcome, events) = drive(&base, &member, &hooks, w.workspace, &mut state, answer_6).await;
+    assert_eq!(outcome, Outcome::Finished);
+    let result = tool_result_content(&events, "toolu_b");
+    assert_eq!(
+        result["batch"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["applied", "failed", "skipped"]
+    );
+    // the secret task is untouched, and the third task was not made
+    let still = owner
+        .call("get_task", json!({"task_id": hidden["id"]}))
+        .await
+        .unwrap();
+    assert_eq!(still["title"], "Secret plan");
+    let titles: Vec<String> = member
+        .call("list_tasks", json!({"limit": 100}))
+        .await
+        .unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["title"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(titles.contains(&"Mine".to_owned()));
+    assert!(!titles.contains(&"After".to_owned()));
+}
+
+#[tokio::test]
+async fn undo_works_for_the_owner_of_the_conversation_only_and_never_twice() {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let assistant = super::AssistantState::new(
+        Arc::new(IdentityRepository::new(database.clone())),
+        CookieMode::secure(),
+        TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        None,
+        orbit_platform::EnvironmentMode::Unspecified,
+    );
+    let now = TimestampMillis::now();
+    let conversation = assistant
+        .store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = session_tools_for(&database, w.workspace, conversation.id, w.owner).await;
+    let project = w.project.to_string();
+    let status = first_status(&owner, &project).await;
+    let existing = owner
+        .call("create_task", json!({"project_id": project, "status_id": status, "title": "Existing", "priority": "low"}))
+        .await
+        .unwrap();
+    // Ask AI makes three changes in one batch: two new tasks and a rename of an existing one
+    let batch = batch_of(vec![
+        (
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "New one"}),
+        ),
+        (
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "New two"}),
+        ),
+        (
+            "update_task",
+            json!({"task_id": existing["id"], "expected_version": existing["version"], "title": "Renamed", "priority": "urgent"}),
+        ),
+    ]);
+    let (base, _fake) = fake_server(vec![
+        tool("toolu_b", "propose_changes", &batch),
+        text("Done."),
+    ])
+    .await;
+    let hooks = FakeHooks::new(super::settings::Gate::Open);
+    let mut state = conversation.state.clone();
+    drive(&base, &owner, &hooks, w.workspace, &mut state, ask("three")).await;
+    let answer_7 = answer(&state, true, Some(&["c1", "c2", "c3"]));
+    let (_, events) = drive(&base, &owner, &hooks, w.workspace, &mut state, answer_7).await;
+    assert_eq!(state.undo.len(), 3);
+    let changes = summary_changes(&events);
+    assert!(
+        changes
+            .iter()
+            .all(|change| change["undo"]["state"] == "available")
+    );
+    let ids: Vec<String> = state.undo.iter().map(|record| record.id.clone()).collect();
+    // the run saves the conversation (its lease ends)
+    assert!(
+        assistant
+            .store
+            .lease(&conversation, "run-1", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        assistant
+            .store
+            .save(&conversation, &state, "run-1", true, now)
+            .await
+            .unwrap()
+    );
+
+    // another member of the workspace cannot undo in this conversation: not found, nothing changes
+    let refused = super::undo_for(&assistant, w.workspace, w.member, conversation.id, &ids).await;
+    assert_eq!(
+        refused.err().map(|response| response.status()),
+        Some(StatusCode::NOT_FOUND)
+    );
+    // nor while a run holds the conversation
+    assert!(
+        assistant
+            .store
+            .lease(
+                &conversation,
+                "run-2",
+                TimestampMillis::now().as_millis() + 60_000,
+                TimestampMillis::now()
+            )
+            .await
+            .unwrap()
+    );
+    let busy = super::undo_for(&assistant, w.workspace, w.owner, conversation.id, &ids).await;
+    assert_eq!(
+        busy.err().map(|response| response.status()),
+        Some(StatusCode::CONFLICT)
+    );
+    assistant
+        .store
+        .release(&conversation, "run-2")
+        .await
+        .unwrap();
+
+    // someone edits the second new task: its undo is refused with a clear message, and the edit stays
+    let second = state.undo[1].task_id.clone();
+    let current = owner
+        .call("get_task", json!({"task_id": second}))
+        .await
+        .unwrap();
+    owner
+        .call("update_task", json!({"task_id": second, "expected_version": current["version"], "title": "Edited by hand"}))
+        .await
+        .unwrap();
+    let results = super::undo_for(&assistant, w.workspace, w.owner, conversation.id, &ids)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes(&results),
+        [
+            (ids[0].clone(), "undone".to_owned()),
+            (ids[1].clone(), "conflict".to_owned()),
+            (ids[2].clone(), "undone".to_owned()),
+        ]
+    );
+    assert!(
+        results[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was changed after Ask AI's change")
+    );
+    // the first new task is in the trash (restorable), the edited one stays, the rename is undone
+    assert!(
+        owner
+            .call("get_task", json!({"task_id": state.undo[0].task_id}))
+            .await
+            .is_err()
+    );
+    let trash = owner.call("list_task_trash", json!({})).await.unwrap();
+    assert!(trash.to_string().contains("New one"));
+    let edited = owner
+        .call("get_task", json!({"task_id": second}))
+        .await
+        .unwrap();
+    assert_eq!(edited["title"], "Edited by hand");
+    let restored = owner
+        .call("get_task", json!({"task_id": existing["id"]}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (restored["title"].as_str(), restored["priority"].as_str()),
+        (Some("Existing"), Some("low"))
+    );
+
+    // once only, kept server-side: the same request again is refused for each
+    let again = super::undo_for(&assistant, w.workspace, w.owner, conversation.id, &ids)
+        .await
+        .unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|r| r["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["already_undone", "conflict", "already_undone"]
+    );
+    // a reload shows each change's undo state now
+    let saved = assistant
+        .store
+        .get(
+            conversation.id,
+            w.workspace,
+            w.owner,
+            TimestampMillis::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let view = super::conversation_view(&saved, None, TimestampMillis::now());
+    let shown = view.to_string();
+    assert!(shown.contains(r#"\"state\":\"undone\""#));
+    assert!(shown.contains(r#"\"state\":\"conflict\""#));
+    assert!(!shown.contains(r#"\"state\":\"available\""#));
+    // the next message tells the model
+    assert_eq!(saved.state.notes.len(), 1);
+    // audited as the member
+    let undo_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action = 'assistant.undo'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(undo_rows, 3);
+}
+
+#[tokio::test]
+async fn an_undo_after_24_hours_is_refused() {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let assistant = super::AssistantState::new(
+        Arc::new(IdentityRepository::new(database.clone())),
+        CookieMode::secure(),
+        TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        None,
+        orbit_platform::EnvironmentMode::Unspecified,
+    );
+    let now = TimestampMillis::now();
+    let conversation = assistant
+        .store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = session_tools_for(&database, w.workspace, conversation.id, w.owner).await;
+    let project = w.project.to_string();
+    let status = first_status(&owner, &project).await;
+    let created = owner
+        .call(
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "Old"}),
+        )
+        .await
+        .unwrap();
+    let mut record = super::undo::record_create(
+        &created,
+        None,
+        now.as_millis() - super::undo::UNDO_TTL_MS - 1,
+    )
+    .unwrap();
+    record.created_at = now.as_millis() - super::undo::UNDO_TTL_MS - 1;
+    let id = record.id.clone();
+    let mut state = conversation.state.clone();
+    state.undo.push(record);
+    assert!(
+        assistant
+            .store
+            .lease(&conversation, "run", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        assistant
+            .store
+            .save(&conversation, &state, "run", true, now)
+            .await
+            .unwrap()
+    );
+    let results = super::undo_for(
+        &assistant,
+        w.workspace,
+        w.owner,
+        conversation.id,
+        std::slice::from_ref(&id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcomes(&results), [(id, "expired".to_owned())]);
+    assert!(
+        owner
+            .call("get_task", json!({"task_id": created["id"]}))
+            .await
+            .is_ok()
+    );
+    // a request without ids, or with too many, is refused before anything is read
+    let none = super::undo_for(&assistant, w.workspace, w.owner, conversation.id, &[]).await;
+    assert_eq!(
+        none.err().map(|response| response.status()),
+        Some(StatusCode::UNPROCESSABLE_ENTITY)
+    );
+}
+
+#[tokio::test]
+async fn two_changes_to_one_task_can_be_undone_in_two_separate_requests() {
+    use super::undo::undo;
+    let tools = VersionedTasks::default();
+    tools.tasks.lock().unwrap().insert(
+        "t1".into(),
+        json!({"id": "t1", "version": 2, "title": "Renamed", "recurrence": null}),
+    );
+    let mut state = state_with(vec![
+        record("u-create", "create_task", "t1", None, 1, Value::Null),
+        record(
+            "u-rename",
+            "update_task",
+            "t1",
+            Some(1),
+            2,
+            json!({"title": "First"}),
+        ),
+    ]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    // as the refusal says: the later change first, one click
+    let first = undo(&mut state, &["u-rename".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&first), [("u-rename".into(), "undone".into())]);
+    assert_eq!(state.undo[1].undone_version, Some(3));
+    // then the earlier one, in a request of its own
+    let second = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&second), [("u-create".into(), "undone".into())]);
+    assert!(tools.tasks.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_earlier_change_waits_for_a_later_one_that_can_no_longer_be_undone() {
+    use super::undo::undo;
+    let tools = VersionedTasks::default();
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t1".into(), json!({"id": "t1", "version": 2}));
+    let mut later = record(
+        "u-rename",
+        "update_task",
+        "t1",
+        Some(1),
+        2,
+        json!({"title": "First"}),
+    );
+    later.expires_at = 5;
+    let mut state = state_with(vec![
+        record("u-create", "create_task", "t1", None, 1, Value::Null),
+        later,
+    ]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("can no longer be undone")
+    );
+    // a later change the task moved on from since its undo: changed since
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t2".into(), json!({"id": "t2", "version": 9}));
+    let mut undone = record(
+        "u-b",
+        "update_task",
+        "t2",
+        Some(1),
+        2,
+        json!({"title": "A"}),
+    );
+    undone.state = super::store::UndoState::Undone;
+    undone.undone_version = Some(3);
+    let mut state = state_with(vec![
+        record("u-a", "create_task", "t2", None, 1, Value::Null),
+        undone,
+    ]);
+    let results = undo(&mut state, &["u-a".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-a".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was changed after")
+    );
+}
+
+#[tokio::test]
+async fn a_sub_issue_added_during_the_undo_of_a_create_puts_the_task_back() {
+    use super::undo::undo;
+    let tools = VersionedTasks {
+        sub_issue_sneaks_in: true,
+        ..VersionedTasks::default()
+    };
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t1".into(), json!({"id": "t1", "version": 1}));
+    let mut state = state_with(vec![record(
+        "u-create",
+        "create_task",
+        "t1",
+        None,
+        1,
+        Value::Null,
+    )]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("put back from the trash")
+    );
+    assert!(tools.tasks.lock().unwrap().contains_key("t1"), "restored");
+    assert!(tools.trash.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn each_change_of_a_batch_counts_toward_the_messages_tool_calls() {
+    let mut harness = Harness::new(vec![
+        tool(
+            "toolu_b",
+            "propose_changes",
+            &creates(&["One", "Two", "Three", "Four"]),
+        ),
+        text("Too many."),
+    ])
+    .await;
+    harness.limits.max_tool_calls = 3;
+    let mut state = state();
+    let (outcome, _) = harness.run(&mut state, ask("four")).await;
+    assert_eq!(outcome, Outcome::Finished);
+    assert!(state.pending.is_none());
+    let told = last_tool_result(&harness.fake.requests()[1]);
+    assert!(
+        told["content"]
+            .as_str()
+            .unwrap()
+            .contains("at most 3 tool calls")
+    );
+    // within the cap the batch waits, and its changes are counted
+    let mut harness = Harness::new(vec![tool(
+        "toolu_b",
+        "propose_changes",
+        &creates(&["One", "Two", "Three"]),
+    )])
+    .await;
+    harness.limits.max_tool_calls = 3;
+    let mut within = super::tests::state();
+    assert_eq!(
+        harness.run(&mut within, ask("three")).await.0,
+        Outcome::Paused
+    );
+    assert_eq!(within.turn.tool_calls, 3);
+    // the approval id carries a part the server made, not only the model's call id
+    let interrupt = within.pending.as_ref().unwrap().interrupt_id.clone();
+    assert!(
+        interrupt.starts_with("approve:toolu_b:") && interrupt.len() > "approve:toolu_b:".len()
+    );
+}
+
+#[tokio::test]
+async fn an_earlier_chat_keeps_no_batch_to_approve_and_no_undo() {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let assistant = super::AssistantState::new(
+        Arc::new(IdentityRepository::new(database.clone())),
+        CookieMode::secure(),
+        TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        None,
+        orbit_platform::EnvironmentMode::Unspecified,
+    );
+    let now = TimestampMillis::now();
+    let first = assistant
+        .store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = session_tools_for(&database, w.workspace, first.id, w.owner).await;
+    let project = w.project.to_string();
+    let status = first_status(&owner, &project).await;
+    let created = owner
+        .call(
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "Made by Ask AI"}),
+        )
+        .await
+        .unwrap();
+    // the chat waits on a batch, and holds an undo record
+    let harness = Harness::new(vec![tool(
+        "toolu_b",
+        "propose_changes",
+        &creates(&["One", "Two"]),
+    )])
+    .await;
+    let mut state = first.state.clone();
+    assert_eq!(harness.run(&mut state, ask("two")).await.0, Outcome::Paused);
+    let record = super::undo::record_create(&created, None, now.as_millis()).unwrap();
+    let id = record.id.clone();
+    state.undo.push(record);
+    assert!(
+        assistant
+            .store
+            .lease(&first, "run", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        assistant
+            .store
+            .save(&first, &state, "run", true, now)
+            .await
+            .unwrap()
+    );
+    // a new chat: the first one goes to the history
+    assistant
+        .store
+        .create(
+            w.workspace,
+            w.owner,
+            "n0nce2".into(),
+            TimestampMillis::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let earlier = assistant
+        .store
+        .get(first.id, w.workspace, w.owner, TimestampMillis::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!earlier.active);
+    // its batch can never be answered: retired, and no run may use it
+    assert!(earlier.state.pending.is_none());
+    assert!(
+        assistant
+            .store
+            .get_active(first.id, w.workspace, w.owner, TimestampMillis::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // no Undo there: refused, and the task stays
+    let refused = super::undo_for(
+        &assistant,
+        w.workspace,
+        w.owner,
+        first.id,
+        std::slice::from_ref(&id),
+    )
+    .await;
+    assert_eq!(
+        refused.err().map(|response| response.status()),
+        Some(StatusCode::CONFLICT)
+    );
+    assert!(
+        owner
+            .call("get_task", json!({"task_id": created["id"]}))
+            .await
+            .is_ok()
+    );
+    // and its summary cards show no Undo buttons
+    let mut messages = vec![json!({
+        "id": "tool-s", "role": "tool", "toolCallId": "s",
+        "content": json!({"card": {"kind": "summary", "changes": [{"verb": "Created", "undo": {"id": id, "state": "available"}}]}}).to_string(),
+    })];
+    super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), false);
+    assert!(!messages[0]["content"].as_str().unwrap().contains("undo"));
+    super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), true);
 }

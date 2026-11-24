@@ -171,6 +171,15 @@ export function setChatModel(workspaceId: string, conversationId: string, model:
   })
 }
 
+/** What one undo did: `undone`, or why not (`conflict`, `expired`, `already_undone`, `not_found`, `uncertain`,
+    `failed`), with a message to show as plain text. */
+export type UndoResult = { id: string; outcome: string; message: string }
+
+/** Undoes changes Ask AI made in this conversation (the server checks they are the user's own and still unchanged). */
+export function undoChanges(workspaceId: string, conversationId: string, ids: string[]): Promise<{ results: UndoResult[] }> {
+  return request(`${assistantBase(workspaceId)}/conversations/${encodeURIComponent(conversationId)}/undo`, { method: 'POST', body: JSON.stringify({ ids }) })
+}
+
 export function useAiSettings(workspaceId: string, enabled: boolean) {
   return useQuery({
     queryKey: assistantKeys.settings(workspaceId),
