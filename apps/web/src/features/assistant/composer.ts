@@ -186,13 +186,36 @@ export function insertMention(text: string, start: number, cursor: number, label
   return { text: `${text.slice(0, start)}${insertion}${text.slice(cursor)}`, cursor: start + insertion.length }
 }
 
+/**
+ * Where "@label" stands in the text as a whole mention: after the start or a space, and before a space, the end or a
+ * punctuation mark. So "@ENG-1" is not found inside "@ENG-12". -1 when it is not there.
+ */
+export function findMention(text: string, label: string, from = 0): number {
+  const needle = `@${label}`
+  for (let index = text.indexOf(needle, from); index !== -1; index = text.indexOf(needle, index + 1)) {
+    const before = index === 0 ? '' : text[index - 1]!
+    const after = text[index + needle.length] ?? ''
+    if ((before === '' || /\s/.test(before)) && (after === '' || /[\s.,!?;:)\]}"']/.test(after))) return index
+  }
+  return -1
+}
+
+/** The text without one "@label" mention (and the space after it); the cursor goes where it stood. */
+export function removeMention(text: string, label: string): { text: string; cursor: number } {
+  const index = findMention(text, label)
+  if (index === -1) return { text, cursor: text.length }
+  let end = index + label.length + 1
+  if (text[end] === ' ') end += 1
+  return { text: `${text.slice(0, index)}${text.slice(end)}`, cursor: index }
+}
+
 /** The mentions a message sends: those still named in its text, once each, at most MAX_MENTIONS. */
 export function mentionsToSend(text: string, mentions: readonly Mention[]): Mention[] {
   const seen = new Set<string>()
   const kept: Mention[] = []
   for (const mention of mentions) {
     const key = `${mention.kind}:${mention.id}`
-    if (seen.has(key) || !text.includes(`@${mention.label}`)) continue
+    if (seen.has(key) || findMention(text, mention.label) === -1) continue
     seen.add(key)
     kept.push(mention)
     if (kept.length === MAX_MENTIONS) break
@@ -219,7 +242,7 @@ export function mentionSegments(text: string, mentions: readonly { kind: Mention
   while (rest) {
     let best: { index: number; kind: MentionKind; needle: string } | null = null
     for (const token of tokens) {
-      const index = rest.indexOf(token.needle)
+      const index = findMention(rest, token.needle.slice(1))
       if (index !== -1 && (best === null || index < best.index)) best = { index, ...token }
     }
     if (!best) {

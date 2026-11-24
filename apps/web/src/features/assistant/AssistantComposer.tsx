@@ -18,6 +18,7 @@ import {
   mentionQuery,
   mentionsToSend,
   parseSlash,
+  removeMention,
   slashQuery,
   type Mention,
   type MentionKind,
@@ -109,9 +110,11 @@ export function AssistantComposer({
 
   function runCommand(command: SlashCommand, rest = '') {
     if ('action' in command.run) {
+      // while a run goes on there is no new chat: the draft stays as it is
+      if (newChatDisabled) return
       place('', 0)
       setMentions([])
-      if (!newChatDisabled) onNewChat()
+      onNewChat()
       return
     }
     const prompt = commandPrompt(command, path, rest) ?? ''
@@ -147,7 +150,8 @@ export function AssistantComposer({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) return
+    // the keys belong to an input method while it composes (Safari reports that only as keyCode 229)
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (menu) {
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -161,7 +165,7 @@ export function AssistantComposer({
         setActive((highlighted + (event.key === 'ArrowDown' ? 1 : count - 1)) % count)
         return
       }
-      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+      if ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Tab' && count > 0)) {
         event.preventDefault()
         // still searching: wait for the rows instead of sending a half-typed "@query"
         if (count > 0) choose(highlighted)
@@ -222,8 +226,9 @@ export function AssistantComposer({
                       className="-mr-0.5 ml-0.5 grid size-3.5 place-items-center rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
                       onClick={() => {
                         setMentions(mentions.filter((other) => other !== mention))
-                        const next = draft.replace(`@${mention.label} `, '').replace(`@${mention.label}`, '')
-                        place(next, next.length)
+                        // only this mention's own "@label", not a longer one that starts the same (@ENG-1 in @ENG-12)
+                        const next = removeMention(draft, mention.label)
+                        place(next.text, next.cursor)
                       }}
                     >
                       <Xmark className="size-3" />

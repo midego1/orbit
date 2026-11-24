@@ -29,12 +29,12 @@ function serve() {
     }
     if (path.endsWith('/pages/recent')) return Response.json({ items: [{ id: 'd1', title: 'Roadmap', icon: null, kind: 'page', parent_id: null, private: false, teamspace_id: null, database_title: null }] })
     if (path.endsWith('/pages/search')) return Response.json({ items: [] })
-    if (path.endsWith('/tasks')) return Response.json({ items: [task('t1', 1, HOSTILE)], next_cursor: null })
+    if (path.endsWith('/tasks')) return Response.json({ items: [task('t1', 1, HOSTILE), task('t12', 12, 'Twelve')], next_cursor: null })
     return Response.json({ items: [], next_cursor: null })
   }) as unknown as typeof fetch
 }
 
-function Harness({ onSend, onNewChat }: { onSend: (text: string, mentions: Mention[]) => boolean; onNewChat: () => void }) {
+function Harness({ onSend, onNewChat, running = false }: { onSend: (text: string, mentions: Mention[]) => boolean; onNewChat: () => void; running?: boolean }) {
   const [draft, setDraft] = useState('')
   const [mentions, setMentions] = useState<Mention[]>([])
   const input = useRef<HTMLTextAreaElement>(null)
@@ -52,16 +52,16 @@ function Harness({ onSend, onNewChat }: { onSend: (text: string, mentions: Menti
       onSend={onSend}
       onStop={() => {}}
       onNewChat={onNewChat}
-      newChatDisabled={false}
+      newChatDisabled={running}
     />
   )
 }
 
-function setup(path = '/tasks/ENG-1') {
+function setup(path = '/tasks/ENG-1', running = false) {
   serve()
   const onSend = mock((_text: string, _mentions: Mention[]) => true)
   const onNewChat = mock(() => {})
-  const view = renderWithWorkspace(<Harness onSend={onSend} onNewChat={onNewChat} />, { path })
+  const view = renderWithWorkspace(<Harness onSend={onSend} onNewChat={onNewChat} running={running} />, { path })
   const field = view.getByRole('combobox', { name: 'Message Ask AI' }) as HTMLTextAreaElement
   const type = (text: string) => fireEvent.change(field, { target: { value: text, selectionStart: text.length } })
   const key = (name: string) => fireEvent.keyDown(field, { key: name })
@@ -122,14 +122,15 @@ test('"@" lists people, tasks, projects and docs; a pick goes in as a chip and i
   const { view, field, type, key, onSend } = setup()
   type('Look at @')
   await waitFor(() => expect(view.getByRole('listbox', { name: 'Mention a task, project, doc or person' })).toBeTruthy())
-  await waitFor(() => expect(view.getAllByRole('option').length).toBe(4))
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
   const rows = view.getAllByRole('option').map((option) => option.textContent)
   expect(rows[0]).toContain('Ada')
   // a hostile title is shown as text, never as markup
   expect(rows[1]).toContain(HOSTILE)
   expect(view.container.querySelector('img[src="x"]')).toBeNull()
-  expect(rows[2]).toContain('Engineering')
-  expect(rows[3]).toContain('Roadmap')
+  expect(rows[2]).toContain('Twelve')
+  expect(rows[3]).toContain('Engineering')
+  expect(rows[4]).toContain('Roadmap')
 
   key('ArrowDown')
   key('Enter')
@@ -154,15 +155,69 @@ test('"@" lists people, tasks, projects and docs; a pick goes in as a chip and i
 test('a mention whose text was deleted is not sent; the chip removes its text', async () => {
   const { view, field, type, key, onSend } = setup()
   type('@')
-  await waitFor(() => expect(view.getAllByRole('option').length).toBe(4))
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
   key('Enter')
   expect(field.value).toBe('@Ada ')
   fireEvent.click(view.getByRole('button', { name: 'Remove Ada' }))
   expect(field.value).toBe('')
   type('@')
-  await waitFor(() => expect(view.getAllByRole('option').length).toBe(4))
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
   key('Enter')
   type('hello')
   key('Enter')
+  expect(onSend).toHaveBeenCalledWith('hello', [])
+})
+
+test('removing a chip takes out only its own mention, not a longer one that starts the same', async () => {
+  const { view, field, type, key, onSend } = setup()
+  type('@')
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
+  key('ArrowDown')
+  key('Enter')
+  type('@ENG-1 @')
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
+  key('ArrowDown')
+  key('ArrowDown')
+  key('Enter')
+  expect(field.value).toBe('@ENG-1 @ENG-12 ')
+  fireEvent.click(view.getByRole('button', { name: 'Remove ENG-1' }))
+  expect(field.value).toBe('@ENG-12 ')
+  type('@ENG-12 next')
+  key('Enter')
+  expect(onSend).toHaveBeenCalledWith('@ENG-12 next', [{ kind: 'task', id: 't12', label: 'ENG-12' }])
+})
+
+test('/new while a run goes on keeps the draft and starts nothing', () => {
+  const { field, type, key, onNewChat } = setup('/tasks', true)
+  type('/new')
+  key('Enter')
+  expect(onNewChat).not.toHaveBeenCalled()
+  expect(field.value).toBe('/new')
+})
+
+test('with no rows yet, Enter waits for the search but Tab moves on', () => {
+  const { view, field, type, onSend } = setup()
+  type('@zz')
+  expect(view.getByRole('listbox')).toBeTruthy()
+  expect(view.queryAllByRole('option')).toHaveLength(0)
+  // fireEvent returns false when the handler prevented the default
+  expect(fireEvent.keyDown(field, { key: 'Enter' })).toBe(false)
+  expect(fireEvent.keyDown(field, { key: 'Tab' })).toBe(true)
+  expect(onSend).not.toHaveBeenCalled()
+})
+
+test('Enter while an input method composes neither sends nor picks (Safari reports keyCode 229)', async () => {
+  const { view, field, type, onSend } = setup()
+  type('hello')
+  expect(fireEvent.keyDown(field, { key: 'Enter', isComposing: true })).toBe(true)
+  expect(fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 })).toBe(true)
+  expect(onSend).not.toHaveBeenCalled()
+  type('@')
+  await waitFor(() => expect(view.getAllByRole('option').length).toBe(5))
+  fireEvent.keyDown(field, { key: 'Enter', keyCode: 229 })
+  expect(field.value).toBe('@')
+  fireEvent.keyDown(field, { key: 'Escape' })
+  type('hello')
+  fireEvent.keyDown(field, { key: 'Enter' })
   expect(onSend).toHaveBeenCalledWith('hello', [])
 })

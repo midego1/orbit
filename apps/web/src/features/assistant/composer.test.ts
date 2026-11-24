@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test'
 import {
   commandPrompt,
+  findMention,
+  removeMention,
   insertMention,
   isOpenPrompt,
   matchingCommands,
@@ -128,4 +130,24 @@ test('a sent message splits into text and mention chips, longest label first', (
 test('stored mentions are read defensively', () => {
   expect(readMentions([{ kind: 'task', token: 'ENG-1' }, { kind: 'script', token: 'x' }, { kind: 'doc' }, null, 'x'])).toEqual([{ kind: 'task', token: 'ENG-1' }])
   expect(readMentions(undefined)).toEqual([])
+})
+
+test('a mention is found and removed only as a whole label, never inside a longer one', () => {
+  expect(findMention('see @ENG-12 now', 'ENG-1')).toBe(-1)
+  expect(findMention('see @ENG-12 and @ENG-1.', 'ENG-1')).toBe(16)
+  expect(findMention('mail x@ENG-1', 'ENG-1')).toBe(-1)
+  expect(removeMention('@ENG-1 @ENG-12 go', 'ENG-1')).toEqual({ text: '@ENG-12 go', cursor: 0 })
+  expect(removeMention('@ENG-12 and @ENG-1', 'ENG-1')).toEqual({ text: '@ENG-12 and ', cursor: 12 })
+  // only one occurrence goes
+  expect(removeMention('@Ada and @Ada', 'Ada').text).toBe('and @Ada')
+  expect(removeMention('nothing here', 'Ada')).toEqual({ text: 'nothing here', cursor: 12 })
+})
+
+test('a shorter label inside a longer mention is neither sent nor shown as a chip', () => {
+  const mentions: Mention[] = [
+    { kind: 'task', id: 't1', label: 'ENG-1' },
+    { kind: 'task', id: 't12', label: 'ENG-12' },
+  ]
+  expect(mentionsToSend('only @ENG-12 here', mentions).map((mention) => mention.id)).toEqual(['t12'])
+  expect(mentionSegments('only @ENG-12 here', [{ kind: 'task', token: 'ENG-1' }])).toEqual([{ text: 'only @ENG-12 here' }])
 })

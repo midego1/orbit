@@ -34,7 +34,8 @@ import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { AssistantComposer, MentionChip } from './AssistantComposer'
-import { isOpenPrompt, mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention, type Suggestion } from './composer'
+import { mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention } from './composer'
+import { useAskDraft } from './useAskDraft'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
 
 /** Loads the user's conversation in this workspace, starts one when there is none, and mounts the runtime on it. */
@@ -152,11 +153,16 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
     // a resume continues from the server's stored state: nothing is sent back
     resumeTranscript: 'appended',
     // only the path and the Follow along switch: the server looks up what the page is itself
-    getRunContext: () => [
-      { description: 'page', value: `${window.location.pathname}${window.location.search}` },
-      { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
-      { description: 'mentions', value: mentions.current },
-    ],
+    getRunContext: () => {
+      // a message's mentions go with its own run only (not with a later approval or message)
+      const mentioned = mentions.current
+      mentions.current = '[]'
+      return [
+        { description: 'page', value: `${window.location.pathname}${window.location.search}` },
+        { description: 'followAlong', value: assistantUi.get().follow ? 'on' : 'off' },
+        { description: 'mentions', value: mentioned },
+      ]
+    },
     onError: (error) => {
       setRunError(error.message || 'Ask AI stopped with an error.')
       if (/ended|start a new chat/i.test(error.message)) onGone()
@@ -228,8 +234,6 @@ function Thread({ onClose, onNewChat, setMentions: setRunMentions, runError, cle
   // while the stored conversation loads, a sent message would be lost: the composer waits
   const loading = useAuiState((s) => s.thread.isLoading)
   const messages = useAuiState((s) => s.thread.messages)
-  const [draft, setDraft] = useState('')
-  const [mentions, setMentions] = useState<Mention[]>([])
   const [pageLink, setPageLink] = useState<string | null>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const root = useRef<HTMLElement>(null)
@@ -291,20 +295,15 @@ function Thread({ onClose, onNewChat, setMentions: setRunMentions, runError, cle
     return true
   }
 
-  // a suggestion that ends open ("Create a task: ") fills the field; the others are sent as they are
-  function suggest(suggestion: Suggestion) {
-    if (isOpenPrompt(suggestion.prompt)) {
-      setDraft(suggestion.prompt)
-      requestAnimationFrame(() => {
-        const element = input.current
-        if (!element) return
-        element.focus()
-        element.selectionStart = element.selectionEnd = suggestion.prompt.length
-      })
-      return
-    }
-    send(suggestion.prompt)
-  }
+  // a suggestion that ends open ("Create a task: ") fills the field; the others are sent, and clear the field
+  const { draft, setDraft, mentions, setMentions, suggest } = useAskDraft(send, (at) =>
+    requestAnimationFrame(() => {
+      const element = input.current
+      if (!element) return
+      element.focus()
+      element.selectionStart = element.selectionEnd = at
+    }),
+  )
   const suggestions = suggestionsFor(`${location.pathname}${location.search}`)
   const answered = !empty && !running && !waiting && last?.role === 'assistant' && draft === ''
 
