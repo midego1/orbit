@@ -33,8 +33,9 @@ use crate::repositories::task_recurrences::TaskRecurrence;
 use crate::repositories::task_relations::NewTaskRelationType;
 use crate::repositories::tasks::{TaskError, TaskRepository};
 use crate::token_api::{
-    DOC_TOO_LARGE_DETAIL, DocMove, DocPatch, NewComment, NewDoc, NewTask, StatusPatch, TaskPatch,
-    TaskQuery, TokenApi, TokenApiError, parse_cycle_filter, parse_milestone_filter,
+    Authorized, DOC_TOO_LARGE_DETAIL, DocMove, DocPatch, NewComment, NewDoc, NewTask, StatusPatch,
+    TaskPatch, TaskQuery, TokenApi, TokenApiError, parse_cycle_filter, parse_due_bound,
+    parse_milestone_filter,
 };
 
 mod comments;
@@ -218,38 +219,14 @@ impl TaskTools {
             .authorize(&principal, ApiTokenScope::TasksRead, self.request_id)
             .await
             .map_err(|_| "The tasks could not be counted".to_owned())?;
-        let invalid = |error: ErrorData| error.message.to_string();
-        let project_id = a
-            .project_id
-            .as_deref()
-            .map(parse_id)
-            .transpose()
-            .map_err(invalid)?;
-        let milestone = a
-            .milestone_id
-            .as_deref()
-            .map(parse_milestone_filter)
-            .transpose()
-            .map_err(|_| "Invalid tool arguments".to_owned())?;
-        let cycle = a
-            .cycle_id
-            .as_deref()
-            .map(parse_cycle_filter)
-            .transpose()
-            .map_err(|_| "Invalid tool arguments".to_owned())?;
-        let parent_task_id = api
-            .optional_task_id(a.parent_task_id.as_deref())
-            .await
-            .map_err(|_| "Unknown parent task".to_owned())?;
+        let mut query = task_query(&api, a).await.map_err(|error| match error {
+            TokenApiError::Invalid(message) => message.to_owned(),
+            TokenApiError::Task(TaskError::NotFound) => "Unknown project or parent task".to_owned(),
+            _ => "The tasks could not be counted".to_owned(),
+        })?;
+        (query.cursor, query.limit) = (None, None);
         let counts = api
-            .task_counts(TaskQuery {
-                project_id,
-                query: a.query,
-                milestone,
-                cycle,
-                parent_task_id,
-                ..Default::default()
-            })
+            .task_counts(query)
             .await
             .map_err(|_| "The tasks could not be counted".to_owned())?;
         let items: Vec<Value> = counts
@@ -279,6 +256,20 @@ struct ListTasksArgs {
     project_id: Option<String>,
     /// Match task title or description, or a task identifier such as ENG-12.
     query: Option<String>,
+    /// Only tasks assigned to this member: a user ID, `me` for yourself (the member this
+    /// connection acts for), or `none` for tasks without an assignee.
+    assignee_id: Option<String>,
+    /// Only tasks in this workflow status (an id from list_task_statuses).
+    status_id: Option<String>,
+    /// Only tasks of this priority: `none`, `low`, `medium`, `high` or `urgent`.
+    priority: Option<String>,
+    /// Only tasks due before this moment: a date (`2026-11-12`, 00:00 UTC) or a UTC time
+    /// (`2026-11-12T15:00:00Z`). Tasks without a due date never match.
+    due_before: Option<String>,
+    /// Only tasks due after this moment, as `due_before` reads it.
+    due_after: Option<String>,
+    /// `true` for tasks with a due date, `false` for tasks without one.
+    has_due_date: Option<bool>,
     /// Only the direct sub-issues of this task: its id, or its identifier such as ENG-12.
     parent_task_id: Option<String>,
     /// Only tasks in this milestone (an id from list_milestones), or `none` for tasks without one.
@@ -290,6 +281,52 @@ struct ListTasksArgs {
     cursor: Option<String>,
     /// Maximum number of tasks, from 1 to 100. Default: 50.
     limit: Option<usize>,
+}
+
+/// The query of `list_tasks` arguments. Ask AI's totals (`count_tasks_in_process`) read the same
+/// filters, so a count covers exactly the tasks the list pages through.
+async fn task_query(api: &Authorized<'_>, a: ListTasksArgs) -> Result<TaskQuery, TokenApiError> {
+    let id = |raw: Option<&str>| {
+        raw.map(|raw| {
+            raw.trim()
+                .parse::<Id>()
+                .map_err(|_| TokenApiError::Invalid("Invalid identifier"))
+        })
+        .transpose()
+    };
+    const DUE: &str = "due_before and due_after must be a date or a UTC time, as 2026-11-12 or 2026-11-12T15:00:00Z";
+    Ok(TaskQuery {
+        project_id: id(a.project_id.as_deref())?,
+        query: a.query,
+        status_id: id(a.status_id.as_deref())?,
+        assignee: a
+            .assignee_id
+            .as_deref()
+            .map(|raw| api.assignee_filter(raw))
+            .transpose()?,
+        priority: a.priority,
+        milestone: a
+            .milestone_id
+            .as_deref()
+            .map(parse_milestone_filter)
+            .transpose()?,
+        cycle: a.cycle_id.as_deref().map(parse_cycle_filter).transpose()?,
+        due_before: a
+            .due_before
+            .as_deref()
+            .map(|raw| parse_due_bound(raw, DUE))
+            .transpose()?,
+        due_after: a
+            .due_after
+            .as_deref()
+            .map(|raw| parse_due_bound(raw, DUE))
+            .transpose()?,
+        has_due_date: a.has_due_date,
+        parent_task_id: api.optional_task_id(a.parent_task_id.as_deref()).await?,
+        cursor: a.cursor,
+        limit: a.limit,
+        ..Default::default()
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -852,7 +889,7 @@ fn tools() -> Vec<Tool> {
         ),
         definition::<ListTasksArgs>(
             "list_tasks",
-            "Search and list live tasks in approved projects. Includes completed tasks and sub-issues; parent_task_id lists the sub-issues of one task. milestone_id and cycle_id filter by plan; cycle_id also takes current, next or previous.",
+            "Search and list live tasks in approved projects. Includes completed tasks and sub-issues; parent_task_id lists the sub-issues of one task. Filter on the server instead of listing everything: assignee_id (a user ID, me or none), status_id, priority, due_before, due_after and has_due_date. milestone_id and cycle_id filter by plan; cycle_id also takes current, next or previous.",
         ),
         definition::<TaskArgs>("get_task", "Read one live task from an approved project."),
         definition::<TaskArgs>(
@@ -1404,26 +1441,9 @@ impl TaskTools {
             }
             "list_tasks" => {
                 let a: ListTasksArgs = arguments(&request)?;
-                let project_id = a.project_id.as_deref().map(parse_id).transpose()?;
-                async {
-                    api.list_tasks(TaskQuery {
-                        project_id,
-                        query: a.query,
-                        milestone: a
-                            .milestone_id
-                            .as_deref()
-                            .map(parse_milestone_filter)
-                            .transpose()?,
-                        cycle: a.cycle_id.as_deref().map(parse_cycle_filter).transpose()?,
-                        parent_task_id: api.optional_task_id(a.parent_task_id.as_deref()).await?,
-                        cursor: a.cursor,
-                        limit: a.limit,
-                        ..Default::default()
-                    })
+                async { api.list_tasks(task_query(&api, a).await?).await }
                     .await
-                }
-                .await
-                .map(|page| json!({"items": page.items, "next_cursor": page.next_cursor}))
+                    .map(|page| json!({"items": page.items, "next_cursor": page.next_cursor}))
             }
             "get_task" => {
                 let a: TaskArgs = arguments(&request)?;

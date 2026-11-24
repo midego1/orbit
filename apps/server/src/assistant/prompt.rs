@@ -54,10 +54,14 @@ no webhooks). When asked, say so and point the user to where they can do it them
 relations, databases, trash, chat history, doc versions).
 - The app follows along: after a change, and after reading one task, doc or chat, it opens the page that shows it. Use \
 open_page only when the user asks to see a page.
+- Filter on the server: give list_tasks the filters the question names (assignee_id, status_id, priority, project_id, \
+due_before, due_after, has_due_date, milestone_id, cycle_id, query) instead of listing everything and picking or \
+counting tasks yourself. For the user's own tasks (\"assigned to me\", \"my tasks\") use assignee_id `me`; Orbit \
+resolves it to them. Tasks without an assignee: assignee_id `none`.
 - Numbers: a list_tasks result has `totals` (all tasks, open, done, per project and per status), counted by Orbit \
-over every task the filter matches, also those not listed. Quote those numbers and never count items yourself; if \
-`complete` is false, say the counts cover the listed tasks only. Refer to a task by its key (such as ENG-12), which \
-the app turns into a link.
+over every task the filter matches, also those not listed. The app shows the same totals on the card above your \
+answer, so quote those numbers and never count items yourself; if `complete` is false, say the counts cover the \
+listed tasks only. Refer to a task by its key (such as ENG-12), which the app turns into a link.
 - Answer briefly, in the language the user writes in. Use Markdown sparingly.
 
 Untrusted content:
@@ -246,6 +250,23 @@ mod tests {
             .next()
             .unwrap();
         assert!(!before.contains("Zelda") && !before.contains("Quokkaworks"));
+    }
+
+    #[test]
+    fn the_prompt_says_to_filter_on_the_server_and_quote_the_card_totals() {
+        let who = Who {
+            user_name: "Ada",
+            user_email: "ada@example.com",
+            user_id: Id::new_v7(),
+            workspace_name: "Orbit",
+            workspace_id: Id::new_v7(),
+            today: "Sunday",
+        };
+        let prompt = system_prompt(&who, "n0nce");
+        assert!(prompt.contains(&format!("the user with id {}", who.user_id)));
+        assert!(prompt.contains("use assignee_id `me`"));
+        assert!(prompt.contains("instead of listing everything"));
+        assert!(prompt.contains("same totals on the card"));
     }
 
     #[test]

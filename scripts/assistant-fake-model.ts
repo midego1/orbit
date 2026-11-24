@@ -11,7 +11,9 @@
 //   "diagram": a Mermaid block with an outside image node; "rename project to X": list_projects, then update_project
 //   (a structured change, which "Allow in this chat" may cover); "move GEN-2 to In Progress": get_task,
 //   list_task_statuses, then update_task (an approval with before → after); "tasks" / "open tasks": list_tasks, then an
-//   answer that quotes the totals Orbit worked out and names a few task keys (chips); "show GEN-1": get_task;
+//   answer that quotes the totals Orbit worked out and names a few task keys (chips); "what is assigned to me" (or
+//   "my tasks"): list_tasks filtered on the server with assignee_id me, then an answer with those totals;
+//   "show GEN-1": get_task;
 //   "list docs": list_docs; "move GEN-2 to In Progress, then keep reading": the change, then get_task again and again
 //   until Orbit's step limit stops the run (its summary card must still show); "plan the launch" (or "batch"):
 //   list_projects, list_task_statuses and list_tasks, then one propose_changes batch of eight changes (six new tasks,
@@ -204,6 +206,11 @@ function answer(messages: Message[]): Response {
       const projects = Object.entries(totals.by_project ?? {}).map(([project, n]) => `- ${project}: ${n}`).join('\n')
       const keys = (listed?.items ?? []).map((item) => item.identifier).filter(Boolean).slice(0, 3)
       const page = totals.complete === false ? ' (first page only)' : ''
+      const mine = /assigned to me|\bmy tasks\b/i.test(asked)
+      if (mine) {
+        const list = (listed?.items ?? []).slice(0, 5).map((item) => `- ${item.identifier} ${item.title ?? ''}`).join('\n')
+        return say(`**${totals.tasks} tasks** are assigned to you${page}: ${totals.open} open and ${totals.done} done.\n\n${list}`)
+      }
       return say(`You have **${totals.tasks} tasks**${page}: ${totals.open} open and ${totals.done} done.\n\n${projects}\n\nStart with ${keys.join(', ')}. Keys I did not look up, such as ZZZ-99, stay plain text, and so does \`${keys[0] ?? 'GEN-1'}\` in code.`)
     }
     if (name === 'get_task') {
@@ -230,6 +237,8 @@ function answer(messages: Message[]): Response {
   if (/list (my )?docs/i.test(asked)) return call('list_docs', {}, 'Let me look at your docs.')
   const showTask = asked.match(/^show ([A-Z][A-Z0-9]*-\d+)/i)
   if (showTask) return call('get_task', { task_id: showTask[1].toUpperCase() })
+  // the filter runs on the server (Orbit resolves `me`); the answer quotes the totals of the card
+  if (/assigned to me|\bmy tasks\b/i.test(asked)) return call('list_tasks', { assignee_id: 'me', limit: 100 }, 'Let me look up the tasks assigned to you.')
   if (/\btasks\b/i.test(asked)) return call('list_tasks', { limit: 100 }, 'Let me look up your tasks.')
   if (/projects/i.test(asked)) return call('list_projects', {})
   if (mentioned.length) return say(`Orbit looked up what you mentioned:\n\n${mentioned.map((line) => `- ${line.slice(2).replace(/\s*\((\w+) id [^)]*\)$/, '')}`).join('\n')}`)
