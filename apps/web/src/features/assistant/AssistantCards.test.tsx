@@ -185,6 +185,8 @@ test('Undo asks the server for that change only and shows it as undone', async (
   })
   expect(asked).toEqual([['u1']])
   await waitFor(() => expect(view.getByText('Undone')).toBeTruthy())
+  // the undone new task is in the trash: no link to it any more
+  expect(view.container.querySelectorAll('[data-change-outcome="applied"] a').length).toBe(1)
   // the other change can still be undone; Undo all is gone with one left
   expect(view.getByRole('button', { name: 'Undo: Updated LCH-2' })).toBeTruthy()
   expect(view.container.querySelector('[data-assistant-undo-all]')).toBeNull()

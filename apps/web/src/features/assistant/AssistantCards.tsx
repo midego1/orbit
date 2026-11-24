@@ -255,15 +255,17 @@ function SummaryRow({ change, view, canUndo, onUndo }: { change: Change; view: U
       <span className="shrink-0 text-muted-foreground">{change.verb}</span>
       {change.key ? <span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground">{change.key}</span> : null}
       <span className={cn('min-w-0 flex-1 truncate', applied ? 'text-foreground' : 'text-muted-foreground', undone && 'line-through decoration-muted-foreground/60')}>{change.title}</span>
-      {change.href && applied ? <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+      {applied && change.href && !(undone && change.verb === 'Created') ? <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
     </>
   )
   const label = change.key ?? change.title
+  // a created task that was undone is in the trash: its link would lead nowhere
+  const href = applied && !(undone && change.verb === 'Created') ? change.href : null
   return (
     <li data-change-outcome={change.outcome} className="flex min-w-0 flex-col">
       <div className="flex min-w-0 items-center gap-1">
-        {change.href && applied ? (
-          <Link to={change.href} className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-xs hover:bg-muted', linkRing)}>
+        {href ? (
+          <Link to={href} className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-xs hover:bg-muted', linkRing)}>
             {content}
           </Link>
         ) : (

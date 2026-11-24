@@ -988,7 +988,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 "tool": item.tool,
                 "risk": item.risk,
                 "args": item.input,
-                "freeText": self.free_text(&item.tool),
+                // text Orbit renders as Markdown or HTML elsewhere, actually given (the card points at it)
+                "freeText": self.free_text(&item.tool) && carries_rich_text(&item.input),
             });
             if let Some(preview) = cards::approval_preview(
                 &self.names,
@@ -1514,6 +1515,25 @@ pub(crate) fn provider_error_text(error: &ProviderError, model: &str) -> String 
         ProviderError::Network(_) => "Orbit could not reach Anthropic. Try again shortly.".into(),
         ProviderError::Protocol(_) => "Anthropic's answer could not be read. Try again.".into(),
         ProviderError::Cancelled => "Stopped.".into(),
+    }
+}
+
+/// Whether a change's arguments hold a rich-text argument (`registry::RICH_TEXT_ARGS`) with a value, at any depth.
+fn carries_rich_text(input: &Value) -> bool {
+    let given = |value: &Value| match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        _ => true,
+    };
+    match input {
+        Value::Object(fields) => fields.iter().any(|(name, value)| {
+            (registry::RICH_TEXT_ARGS.contains(&name.as_str()) && given(value))
+                || carries_rich_text(value)
+        }),
+        Value::Array(items) => items.iter().any(carries_rich_text),
+        _ => false,
     }
 }
 

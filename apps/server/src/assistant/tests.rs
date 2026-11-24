@@ -2910,7 +2910,9 @@ async fn a_batch_waits_as_one_approval_with_a_card_per_change() {
         items[0]["preview"]["task"]["assignees"][0]["name"],
         "Grace Hopper"
     );
-    assert_eq!(items[0]["freeText"], true);
+    // only a change that writes rich text is marked as such
+    assert_eq!(items[0]["freeText"], false);
+    assert_eq!(items[1]["freeText"], true);
     assert_eq!(items[2]["preview"]["kind"], "change");
     assert_eq!(items[2]["preview"]["changes"][0]["before"], "Todo");
     assert_eq!(items[2]["preview"]["changes"][0]["after"], "Done");

@@ -85,9 +85,10 @@ function BatchRow({ item, number, names, checked, disabled, onToggle }: {
   const details = item.preview ? [...view.fields, ...view.details] : view.details
   const label = `${view.title}${view.subject ? `: ${view.subject}` : ''}`
   return (
-    <li data-batch-item={item.id} className={cn('flex min-w-0 gap-2.5 rounded-lg border px-2.5 py-2 transition-opacity', !checked && 'opacity-60')}>
+    <li data-batch-item={item.id} data-checked={checked || undefined} className={cn('flex min-w-0 gap-2.5 rounded-lg border px-2.5 py-2', !checked && 'border-dashed bg-muted/30')}>
       <Checkbox className="mt-0.5" checked={checked} disabled={disabled} aria-label={`Include change ${number}: ${label}`} onCheckedChange={(on) => onToggle(on === true)} />
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      {/* an unticked change fades; its checkbox stays clear, so it is easy to tick again */}
+      <div className={cn('flex min-w-0 flex-1 flex-col gap-1.5 transition-opacity', !checked && 'opacity-55')}>
         <p className="flex min-w-0 items-center gap-1.5 text-xs">
           <span className="shrink-0 text-muted-foreground tabular-nums">{number}.</span>
           <span className="shrink-0 font-medium text-foreground">{view.title}</span>
