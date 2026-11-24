@@ -5138,7 +5138,7 @@ async fn drive<T: ToolRunner>(
     (outcome, events)
 }
 
-async fn session_tools(
+async fn session_tools_for(
     database: &orbit_platform::Database,
     workspace: Id,
     conversation: Id,
@@ -5174,7 +5174,7 @@ async fn each_item_of_a_batch_is_checked_with_the_members_own_access() {
     let w = workspace().await;
     let database = (*w.database).clone();
     let conversation = Id::new_v7();
-    let owner = session_tools(&database, w.workspace, conversation, w.owner).await;
+    let owner = session_tools_for(&database, w.workspace, conversation, w.owner).await;
     // a private project the plain member is not in, with a task the owner made
     let secret = owner
         .call("create_project", json!({"name": "Secret", "key": "SEC"}))
@@ -5187,7 +5187,7 @@ async fn each_item_of_a_batch_is_checked_with_the_members_own_access() {
         .await
         .unwrap();
     // a principal lists the projects it sees when it is made
-    let owner = session_tools(&database, w.workspace, conversation, w.owner).await;
+    let owner = session_tools_for(&database, w.workspace, conversation, w.owner).await;
     let secret_status = first_status(&owner, &secret_id).await;
     let hidden = owner
         .call(
@@ -5196,7 +5196,7 @@ async fn each_item_of_a_batch_is_checked_with_the_members_own_access() {
         )
         .await
         .unwrap();
-    let member = session_tools(&database, w.workspace, conversation, w.member).await;
+    let member = session_tools_for(&database, w.workspace, conversation, w.member).await;
     let project = w.project.to_string();
     let status = first_status(&member, &project).await;
     let batch = batch_of(vec![
@@ -5292,7 +5292,7 @@ async fn undo_works_for_the_owner_of_the_conversation_only_and_never_twice() {
         .await
         .unwrap()
         .unwrap();
-    let owner = session_tools(&database, w.workspace, conversation.id, w.owner).await;
+    let owner = session_tools_for(&database, w.workspace, conversation.id, w.owner).await;
     let project = w.project.to_string();
     let status = first_status(&owner, &project).await;
     let existing = owner
@@ -5493,7 +5493,7 @@ async fn an_undo_after_24_hours_is_refused() {
         .await
         .unwrap()
         .unwrap();
-    let owner = session_tools(&database, w.workspace, conversation.id, w.owner).await;
+    let owner = session_tools_for(&database, w.workspace, conversation.id, w.owner).await;
     let project = w.project.to_string();
     let status = first_status(&owner, &project).await;
     let created = owner
@@ -5726,4 +5726,117 @@ async fn each_change_of_a_batch_counts_toward_the_messages_tool_calls() {
     assert!(
         interrupt.starts_with("approve:toolu_b:") && interrupt.len() > "approve:toolu_b:".len()
     );
+}
+
+#[tokio::test]
+async fn an_earlier_chat_keeps_no_batch_to_approve_and_no_undo() {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    let w = workspace().await;
+    let database = (*w.database).clone();
+    let assistant = super::AssistantState::new(
+        Arc::new(IdentityRepository::new(database.clone())),
+        CookieMode::secure(),
+        TaskTools::in_process(
+            TokenApi::new(Arc::new(TaskRepository::new(database.clone()))),
+            super::REQUEST_ID,
+        ),
+        None,
+        orbit_platform::EnvironmentMode::Unspecified,
+    );
+    let now = TimestampMillis::now();
+    let first = assistant
+        .store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = session_tools_for(&database, w.workspace, first.id, w.owner).await;
+    let project = w.project.to_string();
+    let status = first_status(&owner, &project).await;
+    let created = owner
+        .call(
+            "create_task",
+            json!({"project_id": project, "status_id": status, "title": "Made by Ask AI"}),
+        )
+        .await
+        .unwrap();
+    // the chat waits on a batch, and holds an undo record
+    let harness = Harness::new(vec![tool(
+        "toolu_b",
+        "propose_changes",
+        &creates(&["One", "Two"]),
+    )])
+    .await;
+    let mut state = first.state.clone();
+    assert_eq!(harness.run(&mut state, ask("two")).await.0, Outcome::Paused);
+    let record = super::undo::record_create(&created, None, now.as_millis()).unwrap();
+    let id = record.id.clone();
+    state.undo.push(record);
+    assert!(
+        assistant
+            .store
+            .lease(&first, "run", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        assistant
+            .store
+            .save(&first, &state, "run", true, now)
+            .await
+            .unwrap()
+    );
+    // a new chat: the first one goes to the history
+    assistant
+        .store
+        .create(
+            w.workspace,
+            w.owner,
+            "n0nce2".into(),
+            TimestampMillis::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let earlier = assistant
+        .store
+        .get(first.id, w.workspace, w.owner, TimestampMillis::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!earlier.active);
+    // its batch can never be answered: retired, and no run may use it
+    assert!(earlier.state.pending.is_none());
+    assert!(
+        assistant
+            .store
+            .get_active(first.id, w.workspace, w.owner, TimestampMillis::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // no Undo there: refused, and the task stays
+    let refused = super::undo_for(&assistant, w.workspace, w.owner, first.id, &[id.clone()]).await;
+    assert_eq!(
+        refused.err().map(|response| response.status()),
+        Some(StatusCode::CONFLICT)
+    );
+    assert!(
+        owner
+            .call("get_task", json!({"task_id": created["id"]}))
+            .await
+            .is_ok()
+    );
+    // and its summary cards show no Undo buttons
+    let mut messages = vec![json!({
+        "id": "tool-s", "role": "tool", "toolCallId": "s",
+        "content": json!({"card": {"kind": "summary", "changes": [{"verb": "Created", "undo": {"id": id, "state": "available"}}]}}).to_string(),
+    })];
+    super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), false);
+    assert!(!messages[0]["content"].as_str().unwrap().contains("undo"));
+    super::with_undo_states(&mut messages, &earlier.state, TimestampMillis::now(), true);
 }

@@ -973,10 +973,6 @@ struct UndoMember {
     user_id: Id,
 }
 
-fn unavailable() -> Response {
-    problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again.")
-}
-
 async fn audit_undo(
     state: &AssistantState,
     workspace_id: Id,
