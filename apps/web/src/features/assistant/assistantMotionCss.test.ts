@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
 const css = readFileSync(new URL('../../index.css', import.meta.url), 'utf8')
-const block = css.slice(css.indexOf('@property --assistant-edge-angle'))
+const block = css.slice(css.indexOf('@property --assistant-shimmer-at'))
 
 /** The block with every `@media (prefers-reduced-motion: no-preference) { … }` removed, and those bodies. */
 function splitMotion(source: string): { outside: string; inside: string[] } {
@@ -59,10 +59,16 @@ test('every timing is an --assistant-* token, and every animation has its keyfra
 test('keyframes animate only transform, opacity or the registered --assistant-* properties', () => {
   for (const match of block.matchAll(/@keyframes [\w-]+ \{([\s\S]*?)\n\}/g)) {
     const properties = [...match[1].matchAll(/([\w-]+):/g)].map((property) => property[1])
-    for (const property of properties) expect(['transform', 'opacity', '--assistant-edge-angle', '--assistant-shimmer-at']).toContain(property)
+    for (const property of properties) expect(['transform', 'opacity', '--assistant-shimmer-at']).toContain(property)
   }
-  expect(block).toContain("@property --assistant-edge-angle {\n  syntax: '<angle>';")
   expect(block).toContain("@property --assistant-shimmer-at {\n  syntax: '<percentage>';")
+})
+
+test('the edge light is a rotating layer under a fixed mask, and the text is clipped only where that is supported', () => {
+  expect(block).not.toContain('--assistant-edge-angle')
+  expect(block).toMatch(/\[data-assistant-edge-layer='thinking'\]::before,\s*\[data-assistant-edge-layer='changing'\]::before \{[^}]*will-change: transform;/)
+  expect(block).toMatch(/@supports \(\(-webkit-background-clip: text\) or \(background-clip: text\)\) \{[^@]*color: transparent;/)
+  expect(block.match(/color: transparent;/g)?.length).toBe(1)
 })
 
 test('the overlays never take clicks', () => {

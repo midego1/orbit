@@ -766,13 +766,8 @@ html .bn-mobile-formatting-toolbar {
  *   approval card has a steady violet ring.
  * - prefers-reduced-motion: the same colours, nothing moves.
  * The edge, the dim and the bar never take clicks. Every state also has an icon and a text: colour is never the only
- * sign. Only transform, opacity and the two properties below are animated.
+ * sign. Only transform, opacity and the one property below (the text shimmer) are animated; the edge light is a rotating layer behind a fixed mask, so it runs on the compositor.
  */
-@property --assistant-edge-angle {
-  syntax: '<angle>';
-  inherits: false;
-  initial-value: 0deg;
-}
 @property --assistant-shimmer-at {
   syntax: '<percentage>';
   inherits: false;
@@ -900,8 +895,22 @@ html .bn-mobile-formatting-toolbar {
 [data-assistant-edge-layer='thinking'],
 [data-assistant-edge-layer='changing'] {
   --assistant-edge-rest: color-mix(in oklch, var(--assistant-tone) var(--assistant-edge-floor), transparent);
+  background: none;
+}
+/* The light is an oversized square (it covers the window at any angle) that only rotates, behind the layer's fixed
+   mask: a transform animation, so the window is not repainted on every frame. */
+[data-assistant-edge-layer='thinking']::before,
+[data-assistant-edge-layer='changing']::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 150vmax;
+  height: 150vmax;
+  transform: translate(-50%, -50%);
+  will-change: transform;
   background: repeating-conic-gradient(
-    from var(--assistant-edge-angle) at 50% 50%,
+    from 0deg at 50% 50%,
     var(--assistant-edge-rest) 0deg,
     var(--assistant-edge-rest) 40deg,
     color-mix(in oklch, var(--assistant-tone) 55%, transparent) 115deg,
@@ -912,14 +921,14 @@ html .bn-mobile-formatting-toolbar {
 }
 @media (prefers-reduced-motion: no-preference) {
   /* a layer only runs while its state shows (and holds still while it fades out), so it never jumps */
-  [data-assistant-edge-layer='thinking'] {
+  [data-assistant-edge-layer='thinking']::before {
     animation: assistant-edge-orbit var(--assistant-orbit-thinking) linear infinite paused;
   }
-  [data-assistant-edge-layer='changing'] {
+  [data-assistant-edge-layer='changing']::before {
     animation: assistant-edge-orbit var(--assistant-orbit-changing) linear infinite paused;
   }
-  [data-assistant-edge][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-edge-layer='thinking'],
-  [data-assistant-edge][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-edge-layer='changing'] {
+  [data-assistant-edge][data-motion='orbit'][data-assistant-state='thinking'] [data-assistant-edge-layer='thinking']::before,
+  [data-assistant-edge][data-motion='orbit'][data-assistant-state='changing'] [data-assistant-edge-layer='changing']::before {
     animation-play-state: running;
   }
 }
@@ -928,10 +937,16 @@ html .bn-mobile-formatting-toolbar {
   [data-assistant-edge-layer] {
     background: var(--assistant-tone);
   }
+  [data-assistant-edge-layer]::before {
+    display: none;
+  }
 }
 @keyframes assistant-edge-orbit {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
   to {
-    --assistant-edge-angle: 360deg;
+    transform: translate(-50%, -50%) rotate(360deg);
   }
 }
 
@@ -1072,10 +1087,15 @@ aside[data-assistant][data-assistant-state='waiting'] {
       var(--assistant-tone) var(--assistant-shimmer-at),
       var(--foreground) calc(var(--assistant-shimmer-at) + 18%)
     );
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
     animation: assistant-shimmer var(--assistant-shimmer) ease-in-out infinite;
+  }
+  /* the text is only made transparent where it can be clipped to the band, so it never disappears */
+  @supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    [data-assistant-status][data-motion='orbit'] [data-assistant-status-text] {
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
   }
   [data-assistant-step='running']::before {
     animation: assistant-ring-pulse var(--assistant-ring-pulse) ease-in-out infinite;
