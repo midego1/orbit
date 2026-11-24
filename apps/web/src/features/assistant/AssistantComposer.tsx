@@ -248,7 +248,7 @@ export function AssistantComposer({
               aria-expanded={menu !== null}
               aria-controls={menu ? listId : undefined}
               aria-activedescendant={menu && count > 0 ? optionId(highlighted) : undefined}
-              placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or type / for commands and @ to mention…'}
+              placeholder={waiting ? 'Approve or decline the change first' : 'Ask, or type / or @…'}
               className="field-sizing-content max-h-36 min-h-8 flex-1 resize-none bg-transparent py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
               onChange={(event) => {
                 setDraft(event.target.value)
