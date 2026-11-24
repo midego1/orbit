@@ -25,7 +25,7 @@ use super::engine::{Engine, Input, Limits, Outcome, RunHooks, ToolRunner};
 use super::model::{Block, Role, Usage};
 use super::registry::Registry;
 use super::settings::{self, SettingsError, SettingsRepository};
-use super::store::{ConversationState, ConversationStore};
+use super::store::{ConversationState, ConversationStore, Deleted, Pending, Switch};
 
 // ---- the fake model server ----
 
@@ -1332,19 +1332,31 @@ async fn a_conversation_belongs_to_its_user_and_has_one_run_at_a_time() {
             .unwrap()
             .is_none()
     );
-    // a new chat replaces the old one
+    // a new chat archives the old one: it stays in the history, but no run can use it
     let next = store
         .create(w.workspace, w.owner, "m".into(), now)
         .await
         .unwrap()
         .unwrap();
     assert_ne!(next.id, conversation.id);
+    let archived = store
+        .get(conversation.id, w.workspace, w.owner, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!archived.active);
     assert!(
         store
-            .get(conversation.id, w.workspace, w.owner, now)
+            .get_active(conversation.id, w.workspace, w.owner, now)
             .await
             .unwrap()
             .is_none()
+    );
+    assert!(
+        !store
+            .lease(&archived, "run-3", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
     );
 }
 
@@ -2800,4 +2812,583 @@ async fn task_counts_match_paging_through_the_same_filter() {
         sums[0] - 2,
         "the restricted token does not count Fourth"
     );
+}
+
+// ---- the history ----
+
+/// One run on the conversation: the user says `text` and Ask AI answers.
+async fn talk(
+    store: &ConversationStore,
+    conversation: &super::store::Conversation,
+    text: &str,
+    now: TimestampMillis,
+) -> ConversationState {
+    let mut state = store
+        .get(
+            conversation.id,
+            conversation.workspace_id,
+            conversation.user_id,
+            now,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .state;
+    let run = format!("run-{}", Id::new_v7());
+    assert!(
+        store
+            .lease(conversation, &run, now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    state.display.push(super::agui::user_message(
+        &format!("user-{}", Id::new_v7()),
+        text,
+    ));
+    state.display.push(
+        json!({"id": format!("msg-{}", Id::new_v7()), "role": "assistant", "content": "Done."}),
+    );
+    assert!(
+        store
+            .save(conversation, &state, &run, true, now)
+            .await
+            .unwrap()
+    );
+    state
+}
+
+fn at(now: TimestampMillis, plus: i64) -> TimestampMillis {
+    TimestampMillis::from_millis(now.as_millis() + plus)
+}
+
+#[test]
+fn a_title_is_the_first_message_trimmed_and_cut() {
+    use super::store::{clean_title, derive_title};
+    assert_eq!(
+        derive_title("  What is\nassigned\tto me?  ").as_deref(),
+        Some("What is assigned to me?")
+    );
+    assert_eq!(derive_title(" \n ").as_deref(), None);
+    let long = "word ".repeat(40);
+    let title = derive_title(&long).unwrap();
+    assert_eq!(title.chars().count(), 80);
+    assert!(title.ends_with("word…") || title.ends_with('…'));
+    assert_eq!(
+        clean_title("  Launch   plan \n").as_deref(),
+        Some("Launch plan")
+    );
+    assert_eq!(clean_title("   "), None);
+    assert_eq!(clean_title(&"x".repeat(121)), None);
+    assert_eq!(clean_title("bad\u{0007}bell"), None);
+}
+
+#[tokio::test]
+async fn the_history_lists_opens_renames_continues_and_deletes_conversations() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let first = store
+        .create(w.workspace, w.owner, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &first, "What is assigned to me?", now).await;
+    let second = store
+        .create(w.workspace, w.owner, "b".into(), at(now, 1_000))
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &second, "Summarize\nthe open tasks", at(now, 2_000)).await;
+    // an empty new chat does not show in the history
+    let third = store
+        .create(w.workspace, w.owner, "c".into(), at(now, 3_000))
+        .await
+        .unwrap()
+        .unwrap();
+    let list = store
+        .list(w.workspace, w.owner, None, 50, at(now, 3_000))
+        .await
+        .unwrap();
+    let titles: Vec<_> = list.iter().map(|row| row.title.clone().unwrap()).collect();
+    assert_eq!(
+        titles,
+        ["Summarize the open tasks", "What is assigned to me?"]
+    );
+    assert!(list.iter().all(|row| !row.active && row.message_count == 2));
+
+    // pages: newest first, then the rest after the cursor
+    let page = store
+        .list(w.workspace, w.owner, None, 1, at(now, 3_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        page.len(),
+        2,
+        "one more than the limit says another page follows"
+    );
+    let cursor = (page[0].updated_at, page[0].id);
+    let rest = store
+        .list(w.workspace, w.owner, Some(cursor), 1, at(now, 3_000))
+        .await
+        .unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].id, first.id);
+
+    // open: its display log, as stored
+    let opened = store
+        .get(first.id, w.workspace, w.owner, at(now, 3_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        opened.state.display[0]["content"],
+        "What is assigned to me?"
+    );
+
+    // rename: the member's title stays when the conversation is saved again
+    let renamed = store
+        .rename(first.id, w.workspace, w.owner, "My work", at(now, 3_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renamed.title.as_deref(), Some("My work"));
+
+    // continue: it becomes the active one; the empty chat that was active is gone
+    let Switch::Done(resumed) = store
+        .resume(first.id, w.workspace, w.owner, at(now, 4_000))
+        .await
+        .unwrap()
+    else {
+        panic!("continue failed")
+    };
+    assert!(resumed.active);
+    assert_eq!(resumed.updated_at, at(now, 4_000).as_millis());
+    assert!(
+        store
+            .get(third.id, w.workspace, w.owner, at(now, 4_000))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let current = store
+        .current(w.workspace, w.owner, at(now, 4_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.id, first.id);
+    talk(&store, &current, "And now?", at(now, 5_000)).await;
+    let list = store
+        .list(w.workspace, w.owner, None, 50, at(now, 5_000))
+        .await
+        .unwrap();
+    assert_eq!(list[0].id, first.id);
+    assert_eq!(list[0].title.as_deref(), Some("My work"));
+    assert_eq!(list[0].message_count, 4);
+    assert!(list[0].active);
+
+    // delete: for good, the active one too
+    assert_eq!(
+        store
+            .delete(second.id, w.workspace, w.owner, at(now, 5_000))
+            .await
+            .unwrap(),
+        Deleted::Deleted
+    );
+    assert!(
+        store
+            .get(second.id, w.workspace, w.owner, at(now, 5_000))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM assistant_conversations WHERE id = $1")
+            .bind(second.id.to_string())
+            .fetch_one(w.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    // a run holds the active one: it is not deleted, and no other chat opens
+    assert!(
+        store
+            .lease(
+                &current,
+                "run-x",
+                at(now, 65_000).as_millis(),
+                at(now, 5_000)
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .delete(first.id, w.workspace, w.owner, at(now, 5_000))
+            .await
+            .unwrap(),
+        Deleted::Busy
+    );
+    assert!(
+        store
+            .create(w.workspace, w.owner, "d".into(), at(now, 5_000))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store
+        .save(&current, &current.state, "run-x", true, at(now, 6_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .delete(first.id, w.workspace, w.owner, at(now, 6_000))
+            .await
+            .unwrap(),
+        Deleted::Deleted
+    );
+    assert!(
+        store
+            .current(w.workspace, w.owner, at(now, 6_000))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_idle_chat_stays_in_the_history_and_expires_after_the_retention() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let conversation = store
+        .create(w.workspace, w.owner, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &conversation, "Hello", now).await;
+    let idle = at(now, super::store::IDLE_MS + 1);
+    // the panel starts a new chat after the idle time …
+    assert!(
+        store
+            .current(w.workspace, w.owner, idle)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // … the conversation is still in the history, and can be continued
+    assert_eq!(
+        store
+            .list(w.workspace, w.owner, None, 50, idle)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        store
+            .resume(conversation.id, w.workspace, w.owner, idle)
+            .await
+            .unwrap(),
+        Switch::Done(_)
+    ));
+    // after the retention it is gone
+    let gone = at(idle, super::store::CONVERSATION_TTL_MS + 1);
+    assert!(
+        store
+            .list(w.workspace, w.owner, None, 50, gone)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .get(conversation.id, w.workspace, w.owner, gone)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .resume(conversation.id, w.workspace, w.owner, gone)
+            .await
+            .unwrap(),
+        Switch::NotFound
+    ));
+}
+
+#[tokio::test]
+async fn nobody_else_can_list_open_rename_continue_or_delete_a_conversation() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    // the member's conversation; the owner (a workspace admin) and another workspace see nothing of it
+    let conversation = store
+        .create(w.workspace, w.member, "a".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    talk(&store, &conversation, "My private question", now).await;
+    let elsewhere = Id::new_v7();
+    for (workspace, user) in [(w.workspace, w.owner), (elsewhere, w.member)] {
+        assert!(
+            store
+                .list(workspace, user, None, 50, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .get(conversation.id, workspace, user, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.current(workspace, user, now).await.unwrap().is_none());
+        assert!(
+            store
+                .rename(conversation.id, workspace, user, "Mine now", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .resume(conversation.id, workspace, user, now)
+                .await
+                .unwrap(),
+            Switch::NotFound
+        ));
+        assert_eq!(
+            store
+                .delete(conversation.id, workspace, user, now)
+                .await
+                .unwrap(),
+            Deleted::NotFound
+        );
+    }
+    // still the member's, unchanged and active
+    let mine = store
+        .get(conversation.id, w.workspace, w.member, now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mine.active);
+    assert_eq!(mine.title.as_deref(), Some("My private question"));
+    // the owner's own new chat does not archive the member's
+    store
+        .create(w.workspace, w.owner, "b".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .current(w.workspace, w.member, now)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn the_oldest_conversations_are_pruned_beyond_the_cap() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let cap = super::store::MAX_CONVERSATIONS;
+    let mut ids = Vec::new();
+    for step in 0..=cap {
+        let conversation = store
+            .create(w.workspace, w.owner, "n".into(), at(now, step * 10))
+            .await
+            .unwrap()
+            .unwrap();
+        talk(
+            &store,
+            &conversation,
+            &format!("Question {step}"),
+            at(now, step * 10 + 1),
+        )
+        .await;
+        ids.push(conversation.id);
+    }
+    let count = |user: Id| {
+        let pool = w.database.pool().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM assistant_conversations WHERE user_id = $1",
+            )
+            .bind(user.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // `cap + 1` conversations were made: the oldest went when the newest started (the cap counts it)
+    let later = at(now, (cap + 1) * 10);
+    assert_eq!(count(w.owner).await, cap);
+    assert!(
+        store
+            .get(ids[0], w.workspace, w.owner, later)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get(ids[1], w.workspace, w.owner, later)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // the next new chat prunes the next oldest; the member's other conversations stay
+    store
+        .create(w.workspace, w.owner, "n".into(), later)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(count(w.owner).await, cap);
+    assert!(
+        store
+            .get(ids[1], w.workspace, w.owner, later)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get(ids[2], w.workspace, w.owner, later)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get(
+                ids[usize::try_from(cap).unwrap()],
+                w.workspace,
+                w.owner,
+                later
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn an_approval_of_a_chat_switched_away_from_can_never_be_applied() {
+    let w = workspace().await;
+    let store = ConversationStore::new((*w.database).clone());
+    let now = TimestampMillis::now();
+    let conversation = store
+        .create(w.workspace, w.owner, "n0nce".into(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    // a run asks for approval of a change (and the member allowed another kind of change for this chat)
+    let args = json!({"project_id": "p1", "status_id": "s1", "title": "Write the launch post"});
+    let harness = Harness::new(vec![
+        tool("toolu_w", "create_task", &args),
+        text("Created."),
+    ])
+    .await;
+    let mut state = conversation.state.clone();
+    let (outcome, _) = harness
+        .run(&mut state, ask("Create a task: write the launch post"))
+        .await;
+    assert_eq!(outcome, Outcome::Paused);
+    state.allowed_tools.insert("update_task".into());
+    let interrupt_id = state.pending.clone().unwrap().interrupt_id;
+    assert!(
+        store
+            .lease(&conversation, "run-1", now.as_millis() + 60_000, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .save(&conversation, &state, "run-1", true, now)
+            .await
+            .unwrap()
+    );
+
+    // the member starts a new chat: the approval expires with the old one
+    let next = store
+        .create(w.workspace, w.owner, "m".into(), at(now, 1_000))
+        .await
+        .unwrap()
+        .unwrap();
+    let old = store
+        .get(conversation.id, w.workspace, w.owner, at(now, 1_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(old.state.pending.is_none());
+    assert!(
+        old.state.allowed_tools.is_empty(),
+        "Allow in this chat is withdrawn"
+    );
+    let last = old.state.display.last().unwrap();
+    assert_eq!(last["toolCallId"], "toolu_w");
+    assert_eq!(last["content"], json!({"expired": true}).to_string());
+    // the model is told the change was not made
+    let Some(super::model::Message {
+        role: Role::User,
+        content,
+    }) = old.state.transcript.last()
+    else {
+        panic!("the transcript ends with the results")
+    };
+    assert!(content.iter().any(|block| matches!(block,
+        Block::ToolResult { tool_use_id, content, .. } if tool_use_id == "toolu_w" && content.contains("NOT performed"))));
+    // no run may use the old conversation while it is archived
+    assert!(
+        store
+            .get_active(conversation.id, w.workspace, w.owner, at(now, 1_000))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !store
+            .lease(&old, "run-2", now.as_millis() + 60_000, at(now, 1_000))
+            .await
+            .unwrap()
+    );
+
+    // continued later, the old approval answers nothing
+    let Switch::Done(resumed) = store
+        .resume(conversation.id, w.workspace, w.owner, at(now, 2_000))
+        .await
+        .unwrap()
+    else {
+        panic!("continue failed")
+    };
+    assert!(resumed.state.pending.is_none());
+    assert!(
+        store
+            .get(next.id, w.workspace, w.owner, at(now, 2_000))
+            .await
+            .unwrap()
+            .is_none(),
+        "the empty chat went"
+    );
+    let mut state = resumed.state.clone();
+    let (outcome, events) = harness
+        .run(
+            &mut state,
+            Input::Resume {
+                interrupt_id,
+                approved: true,
+                allow_for_conversation: false,
+            },
+        )
+        .await;
+    assert_eq!(outcome, Outcome::Rejected);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["code"] == "no_pending_approval")
+    );
+    assert!(harness.tools.names().is_empty(), "the change never ran");
 }

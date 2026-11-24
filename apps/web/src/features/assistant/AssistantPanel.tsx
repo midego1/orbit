@@ -1,6 +1,8 @@
-// The Ask AI panel. The conversation is kept on the server (per user and workspace, a few hours): the panel loads it,
-// mounts the AG-UI runtime on it and streams runs from `POST …/run`. The server stores a waiting change with its exact
-// arguments; the approval card only answers approve or decline, so a reload shows the same card.
+// The Ask AI panel. The conversation is kept on the server (per user and workspace, with a history of earlier ones):
+// the panel loads the active one, mounts the AG-UI runtime on it and streams runs from `POST …/run`. The server stores
+// a waiting change with its exact arguments; the approval card only answers approve or decline, so a reload shows the
+// same card. The history (clock button) lists earlier chats; one opens read-only from its stored messages and cards,
+// and Continue makes it the active chat again (its old approvals have expired on the server).
 import { useContext, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type Ref } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -16,7 +18,7 @@ import {
   type ToolCallMessagePartProps,
 } from '@assistant-ui/react'
 import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime } from '@assistant-ui/react-ag-ui'
-import { ArrowUp, ArrowUpRight, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
+import { ArrowLeft, ArrowUp, ArrowUpRight, Clock, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
 import { cn } from 'cn'
 import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -29,11 +31,15 @@ import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
-import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
+import { assistantBase, assistantKeys, continueConversation, fetchAssistantStatus, openConversation, startConversation, stopConversation, type AssistantConversation, type AssistantStatus, type ConversationSummary } from './api'
+import { AssistantHistory } from './AssistantHistory'
+import { chatTitle } from './history'
 import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
+
+type View = { kind: 'chat' } | { kind: 'history' } | { kind: 'earlier'; id: string }
 
 const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
 
@@ -44,22 +50,50 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
   const key = assistantKeys.status(workspace.id)
   const status = useQuery({ queryKey: key, queryFn: () => fetchAssistantStatus(workspace.id), refetchOnWindowFocus: false })
   const [startError, setStartError] = useState<string | null>(null)
+  const [view, setView] = useState<View>({ kind: 'chat' })
+  const [switchError, setSwitchError] = useState<string | null>(null)
   const starting = useRef(false)
   const ready = status.data?.setup === 'ready'
   const conversation = status.data?.conversation ?? null
 
-  async function newChat() {
+  function showConversation(next: AssistantConversation) {
+    client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, conversation: next } : old))
+    void client.invalidateQueries({ queryKey: assistantKeys.history(workspace.id) })
+  }
+
+  /** Starts a new chat; the current one moves to the history. From the history, a refusal (a run still works) shows there. */
+  async function newChat(fromHistory = false, stay = false) {
     if (starting.current) return
     starting.current = true
     setStartError(null)
+    setSwitchError(null)
     try {
       const started = await startConversation(workspace.id)
-      client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, conversation: started.conversation } : old))
+      showConversation(started.conversation)
+      if (!stay) setView({ kind: 'chat' })
     } catch (error) {
-      setStartError(error instanceof Error ? error.message : 'A new chat could not be started.')
+      const message = error instanceof Error ? error.message : 'A new chat could not be started.'
+      if (fromHistory) setSwitchError(message)
+      else setStartError(message)
     } finally {
       starting.current = false
     }
+  }
+
+  async function continueChat(id: string) {
+    setSwitchError(null)
+    try {
+      const resumed = await continueConversation(workspace.id, id)
+      showConversation(resumed.conversation)
+      setView({ kind: 'chat' })
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : 'This chat could not be continued.')
+    }
+  }
+
+  function openFromHistory(summary: ConversationSummary) {
+    setSwitchError(null)
+    setView(summary.id === conversation?.id ? { kind: 'chat' } : { kind: 'earlier', id: summary.id })
   }
 
   // no conversation yet (first use, or the last one expired): start one
@@ -114,24 +148,127 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
       </PanelShell>
     )
   }
+  const back = () => {
+    setSwitchError(null)
+    setView({ kind: 'chat' })
+  }
+  return (
+    <>
+      {/* the chat stays mounted under the history, so a run that works keeps streaming */}
+      <div className={view.kind === 'chat' ? 'flex h-full min-h-0 w-full' : 'hidden'}>
+        <ConversationRuntime
+          key={conversation.id}
+          workspaceId={workspace.id}
+          conversation={conversation}
+          onClose={onClose}
+          onNewChat={() => void newChat()}
+          onHistory={() => setView({ kind: 'history' })}
+          onGone={() => void status.refetch()}
+        />
+      </div>
+      {view.kind === 'history' ? (
+        <PanelShell
+          onClose={onClose}
+          title="History"
+          leading={<BackButton onBack={back} />}
+          tools={
+            <Tip label="New chat">
+              <Button variant="ghost" size="icon-sm" aria-label="New chat" onClick={() => void newChat(true)}>
+                <Edit2 />
+              </Button>
+            </Tip>
+          }
+        >
+          {switchError ? (
+            <p role="alert" className="mx-3 mt-3 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+              {switchError}
+            </p>
+          ) : null}
+          <AssistantHistory
+            workspaceId={workspace.id}
+            onOpen={openFromHistory}
+            onDeleted={(deleted) => {
+              // the open chat is gone: a fresh one takes its place (the history stays in view)
+              if (deleted.id === conversation.id) void newChat(true, true)
+            }}
+          />
+        </PanelShell>
+      ) : null}
+      {view.kind === 'earlier' ? (
+        <EarlierConversation
+          key={view.id}
+          workspaceId={workspace.id}
+          id={view.id}
+          onClose={onClose}
+          onBack={() => setView({ kind: 'history' })}
+          onContinue={() => continueChat(view.id)}
+          error={switchError}
+        />
+      ) : null}
+    </>
+  )
+}
+
+function BackButton({ onBack, label = 'Back to the chat' }: { onBack: () => void; label?: string }) {
+  return (
+    <Tip label={label}>
+      <Button variant="ghost" size="icon-sm" aria-label={label} className="-ml-2" onClick={onBack}>
+        <ArrowLeft />
+      </Button>
+    </Tip>
+  )
+}
+
+/** An earlier conversation, read-only: its stored messages and the server's cards, as they were. */
+function EarlierConversation({ workspaceId, id, onClose, onBack, onContinue, error }: {
+  workspaceId: string
+  id: string
+  onClose: () => void
+  onBack: () => void
+  onContinue: () => Promise<void>
+  error: string | null
+}) {
+  const opened = useQuery({ queryKey: assistantKeys.conversation(workspaceId, id), queryFn: () => openConversation(workspaceId, id), refetchOnWindowFocus: false, gcTime: 0 })
+  if (opened.isPending || opened.isError) {
+    return (
+      <PanelShell onClose={onClose} title="History" leading={<BackButton onBack={onBack} label="Back to the history" />}>
+        {opened.isPending ? (
+          <Notice>
+            <Spinner className="size-4 text-muted-foreground" />
+          </Notice>
+        ) : (
+          <Notice title="This chat could not be opened" text={opened.error.message}>
+            <Button variant="outline" size="sm" onClick={onBack}>
+              Back to the history
+            </Button>
+          </Notice>
+        )}
+      </PanelShell>
+    )
+  }
   return (
     <ConversationRuntime
-      key={conversation.id}
-      workspaceId={workspace.id}
-      conversation={conversation}
+      workspaceId={workspaceId}
+      conversation={opened.data.conversation}
       onClose={onClose}
-      onNewChat={() => void newChat()}
-      onGone={() => void status.refetch()}
+      onNewChat={() => {}}
+      onGone={() => {}}
+      earlier={{ onBack, onContinue, error }}
     />
   )
 }
 
-function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onGone }: {
+type Earlier = { onBack: () => void; onContinue: () => Promise<void>; error: string | null }
+
+function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onHistory, onGone, earlier }: {
   workspaceId: string
   conversation: AssistantConversation
   onClose: () => void
   onNewChat: () => void
+  onHistory?: () => void
   onGone: () => void
+  /** An earlier conversation, shown read-only (no runs). */
+  earlier?: Earlier
 }) {
   const [runError, setRunError] = useState<string | null>(null)
   const agent = useMemo(() => new HttpAgent({ url: `${assistantBase(workspaceId)}/run`, threadId: conversation.id }), [workspaceId, conversation.id])
@@ -164,6 +301,8 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
       <Thread
         onClose={onClose}
         onNewChat={onNewChat}
+        onHistory={onHistory}
+        earlier={earlier ? { ...earlier, title: chatTitle(conversation) } : undefined}
         runError={runError}
         clearError={() => setRunError(null)}
         onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
@@ -172,13 +311,14 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   )
 }
 
-/** The panel's header and body. `tools` are the header buttons of a running conversation. */
-function PanelShell({ onClose, tools, children, ref }: { onClose: () => void; tools?: ReactNode; children: ReactNode; ref?: Ref<HTMLElement> }) {
+/** The panel's header and body. `tools` are the header buttons of a running conversation; `leading` (a Back button)
+ * takes the place of the icon. */
+function PanelShell({ onClose, title = 'Ask AI', leading, tools, children, ref }: { onClose: () => void; title?: string; leading?: ReactNode; tools?: ReactNode; children: ReactNode; ref?: Ref<HTMLElement> }) {
   return (
-    <section ref={ref} aria-label="Ask AI" className="flex h-full min-h-0 w-full flex-col bg-background">
+    <section ref={ref} aria-label={title === 'Ask AI' ? 'Ask AI' : `Ask AI: ${title}`} className="flex h-full min-h-0 w-full flex-col bg-background">
       <header className="flex min-h-12 shrink-0 items-center gap-1 border-b py-1.5 pr-2 pl-4">
-        <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />
-        <h2 className="ml-1.5 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold text-foreground">Ask AI</h2>
+        {leading ?? <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />}
+        <h2 className="ml-1.5 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold text-foreground">{title}</h2>
         {tools}
         <Tip label="Close">
           <Button variant="ghost" size="icon-sm" aria-label="Close Ask AI" onClick={onClose}>
@@ -205,9 +345,12 @@ function isWaiting(approval: { approved?: boolean; resolution?: string } | undef
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
+function Thread({ onClose, onNewChat, onHistory, earlier, runError, clearError, onStop }: {
   onClose: () => void
   onNewChat: () => void
+  onHistory?: () => void
+  /** Read-only: an earlier conversation, with Continue in place of the composer. */
+  earlier?: Earlier & { title: string }
   runError: string | null
   clearError: () => void
   onStop: () => void
@@ -260,15 +403,20 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   // says "Changing …"
   const thinking = running && !callInFlight && run.state === 'thinking'
 
+  // an earlier conversation never runs: the page edge and status line stay with the active chat
   useEffect(() => {
-    assistantUi.setRun(run)
+    if (!earlier) assistantUi.setRun(run)
     // the run is derived from these two
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [running, messages])
-  useEffect(() => () => assistantUi.setRun(IDLE_RUN), [])
+  useEffect(() => () => {
+    if (!earlier) assistantUi.setRun(IDLE_RUN)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   useEffect(() => {
     input.current?.focus()
   }, [focusToken])
+  const [continuing, setContinuing] = useState(false)
 
   function send(text = draft) {
     const message = text.trim()
@@ -285,13 +433,20 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
     }
   }
 
-  const tools = (
+  const tools = earlier ? null : (
     <>
       <Tip label={follow ? 'Follow along is on: the page goes where Ask AI works' : 'Follow along is off: Ask AI shows a link instead'}>
         <Button variant="ghost" size="icon-sm" aria-label="Follow along" aria-pressed={follow} className={cn(follow ? 'text-foreground' : 'text-muted-foreground')} onClick={() => assistantUi.setFollow(!follow)}>
           {follow ? <Eye /> : <EyeSlash />}
         </Button>
       </Tip>
+      {onHistory ? (
+        <Tip label="History">
+          <Button variant="ghost" size="icon-sm" aria-label="Chat history" onClick={onHistory}>
+            <Clock />
+          </Button>
+        </Tip>
+      ) : null}
       {!empty ? (
         <Tip label="New chat">
           <Button variant="ghost" size="icon-sm" aria-label="New chat" disabled={running} onClick={onNewChat}>
@@ -308,8 +463,14 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
   )
 
   return (
-    <PanelShell ref={root} onClose={onClose} tools={tools}>
-      <AssistantStatusLine />
+    <PanelShell
+      ref={root}
+      onClose={onClose}
+      tools={tools}
+      title={earlier?.title}
+      leading={earlier ? <BackButton onBack={earlier.onBack} label="Back to the history" /> : undefined}
+    >
+      {earlier ? null : <AssistantStatusLine />}
       <TaskChipContext value={textRun}>
         <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
           <ThreadPrimitive.Viewport autoScroll className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
@@ -336,12 +497,34 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
               ) : null}
             </ol>
           </ThreadPrimitive.Viewport>
-          {runError ? (
+          {earlier ? (
+            <div className="flex shrink-0 flex-col gap-2 border-t px-3 py-3">
+              {earlier.error ? (
+                <p role="alert" className="rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+                  {earlier.error}
+                </p>
+              ) : null}
+              <div className="flex items-center gap-2">
+                <p className="min-w-0 flex-1 text-xs text-muted-foreground">An earlier chat. Continue it to ask more; changes it asked for and you did not approve have expired.</p>
+                <Button
+                  size="sm"
+                  disabled={continuing}
+                  onClick={() => {
+                    setContinuing(true)
+                    void earlier.onContinue().finally(() => setContinuing(false))
+                  }}
+                >
+                  Continue this chat
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {runError && !earlier ? (
             <p role="alert" className="mx-3 mb-2 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
               {runError}
             </p>
           ) : null}
-          {!follow && pageLink ? (
+          {!follow && pageLink && !earlier ? (
             <button
               type="button"
               className="mx-3 mb-2 flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-left text-xs text-foreground transition-colors outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -352,6 +535,7 @@ function Thread({ onClose, onNewChat, runError, clearError, onStop }: {
             </button>
           ) : null}
           <form
+            hidden={!!earlier}
             className="shrink-0 px-3 pb-3"
             onSubmit={(event: FormEvent) => {
               event.preventDefault()
