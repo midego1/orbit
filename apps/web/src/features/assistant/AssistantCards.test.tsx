@@ -1,10 +1,11 @@
 import { expect, test } from 'bun:test'
-import { fireEvent, render } from '@testing-library/react'
+import { act, fireEvent, render, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { renderMarkdownBlocks } from '@/lib/markdown'
 import { MarkdownTextContext } from '@/lib/markdownTextContext'
 import { PreviewCard, ResultCard } from './AssistantCards'
 import { taskChipRun } from './taskChipRun'
+import { UndoContext, type UndoChanges } from './undoContext'
 import { readCard, readPreview, totalsLine, type CardData, type KnownTask } from './cards'
 
 const W = '0193aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee'
@@ -127,4 +128,105 @@ test('a group header says "N of M" when the server counted more tasks than the c
   const view = show(<ResultCard card={card} />)
   expect(view.getByText('Launch').closest('p')?.textContent).toBe('Launch2 of 30')
   expect(view.getByText('General').closest('p')?.textContent).toBe('General1 of 10')
+})
+
+// ---- the summary card: outcomes and undo ----
+
+function summary(changes: unknown[]) {
+  return readCard({ card: { kind: 'summary', changes } }, 'orbit_summary') as CardData
+}
+
+const applied = (n: number, undo: unknown = { id: `u${n}`, state: 'available' }) => ({
+  verb: n % 2 ? 'Created' : 'Updated',
+  key: `LCH-${n}`,
+  title: `Task ${n}`,
+  href: `/tasks/t${n}?workspace=${W}`,
+  outcome: 'applied',
+  undo,
+})
+
+function showUndo(card: CardData, undo: UndoChanges | null) {
+  return render(
+    <MemoryRouter>
+      <UndoContext value={undo}>
+        <ResultCard card={card} />
+      </UndoContext>
+    </MemoryRouter>,
+  )
+}
+
+test('a batch summary counts applied, failed and skipped changes, with the reason of each', () => {
+  const card = summary([
+    applied(1),
+    applied(2),
+    { verb: 'Create task', key: null, title: 'Three', href: null, outcome: 'failed', note: 'status_id must be a status of the project' },
+    { verb: 'Create task', key: null, title: 'Four', href: null, outcome: 'skipped', note: 'an earlier change of the batch failed' },
+    { verb: 'Update task', key: 'LCH-5', title: 'Five', href: null, outcome: 'skipped', note: 'not selected by the user' },
+  ])
+  const view = showUndo(card, null)
+  expect(view.getByText('2 applied · 1 failed · 2 not run')).toBeTruthy()
+  expect(view.getByText('Failed: status_id must be a status of the project')).toBeTruthy()
+  expect(view.getByText('Not run: not selected by the user')).toBeTruthy()
+  // only applied changes link anywhere; without the panel's undo there are no Undo buttons
+  expect(view.container.querySelectorAll('[data-change-outcome="applied"] a').length).toBe(2)
+  expect(view.container.querySelectorAll('[data-change-outcome="skipped"] a').length).toBe(0)
+  expect(view.queryByRole('button', { name: /Undo/ })).toBeNull()
+})
+
+test('Undo asks the server for that change only and shows it as undone', async () => {
+  const asked: string[][] = []
+  const view = showUndo(summary([applied(1), applied(2)]), async (ids) => {
+    asked.push(ids)
+    return ids.map((id) => ({ id, outcome: 'undone', message: 'LCH-1 was moved to the trash.' }))
+  })
+  expect(view.getByText('2 changes applied')).toBeTruthy()
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Undo: Created LCH-1' }))
+  })
+  expect(asked).toEqual([['u1']])
+  await waitFor(() => expect(view.getByText('Undone')).toBeTruthy())
+  // the other change can still be undone; Undo all is gone with one left
+  expect(view.getByRole('button', { name: 'Undo: Updated LCH-2' })).toBeTruthy()
+  expect(view.container.querySelector('[data-assistant-undo-all]')).toBeNull()
+})
+
+test('Undo all sends every change that can still be undone, and shows a conflict as a message', async () => {
+  const asked: string[][] = []
+  const view = showUndo(summary([applied(1), applied(2), applied(3, { id: 'u3', state: 'undone' }), applied(4, null)]), async (ids) => {
+    asked.push(ids)
+    return [
+      { id: 'u1', outcome: 'undone', message: '' },
+      { id: 'u2', outcome: 'conflict', message: 'LCH-2 was changed after Ask AI’s change (by you or someone else), so it was not undone.' },
+    ]
+  })
+  await act(async () => {
+    fireEvent.click(view.container.querySelector('[data-assistant-undo-all]') as HTMLElement)
+  })
+  expect(asked).toEqual([['u1', 'u2']])
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('LCH-2 was changed after'))
+  expect(view.getByText('Can’t undo')).toBeTruthy()
+  expect(view.getAllByText('Undone').length).toBe(2)
+  // a change without an undo record has no button
+  expect(view.queryByRole('button', { name: 'Undo: Updated LCH-4' })).toBeNull()
+})
+
+test('an expired undo says so, and a failed request leaves the button to try again', async () => {
+  const view = showUndo(summary([applied(1, { id: 'u1', state: 'expired' }), applied(2)]), async () => {
+    throw new Error('Ask AI is still working on this conversation; undo when it has finished.')
+  })
+  expect(view.getByText('Undo expired')).toBeTruthy()
+  await act(async () => {
+    fireEvent.click(view.getByRole('button', { name: 'Undo: Updated LCH-2' }))
+  })
+  await waitFor(() => expect(view.getByRole('alert').textContent).toContain('still working'))
+  expect(view.getByRole('button', { name: 'Undo: Updated LCH-2' })).toBeTruthy()
+})
+
+test('summary entries are checked: a bad undo id or state is not trusted', () => {
+  const card = summary([applied(1, { id: '../x', state: 'available' }), applied(2, { id: 'u2', state: 'weird' })]) as Extract<CardData, { kind: 'summary' }>
+  expect(card.changes[0].undo).toBeNull()
+  expect(card.changes[1].undo).toEqual({ id: 'u2', state: 'expired' })
+  // an entry from before batches is an applied change
+  const old = summary([{ verb: 'Created', key: 'LCH-1', title: 'One', href: null }]) as Extract<CardData, { kind: 'summary' }>
+  expect(old.changes[0].outcome).toBe('applied')
 })

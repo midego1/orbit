@@ -15,7 +15,7 @@ import {
   type ThreadHistoryAdapter,
   type ToolCallMessagePartProps,
 } from '@assistant-ui/react'
-import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime } from '@assistant-ui/react-ag-ui'
+import { fromAgUiMessages, useAgUiInterrupts, useAgUiRuntime, useAgUiSubmitInterruptResponses } from '@assistant-ui/react-ag-ui'
 import { ArrowUp, ArrowUpRight, Copy, Edit2, Eye, EyeSlash, Maximize4, Minimize, Sparkles, Stop, TickCircle, CloseCircle, PauseCircle, Xmark } from 'reicon-react'
 import { cn } from 'cn'
 import { Tip } from '@/components/common/Tip'
@@ -29,11 +29,13 @@ import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
-import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, type AssistantConversation, type AssistantStatus } from './api'
-import { PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
+import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, stopConversation, undoChanges, type AssistantConversation, type AssistantStatus } from './api'
+import { Fields, PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
+import { BatchApprovalCard } from './BatchApprovalCard'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
-import { knownTasks, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
-import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepField, type StepOutcome, type StepView } from './toolSteps'
+import { BATCH_TOOL, knownTasks, outcomeLine, readBatch, readBatchResult, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
+import { UndoContext, type UndoChanges } from './undoContext'
+import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepOutcome, type StepView } from './toolSteps'
 
 const STARTERS = ['What is assigned to me?', 'Create a task: write the launch post', 'Summarize the open tasks of my projects', 'Open my docs']
 
@@ -159,15 +161,19 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
       if (/ended|start a new chat/i.test(error.message)) onGone()
     },
   })
+  // Undo is a request of the user's own, to the server; the model has no part in it
+  const undo = useMemo<UndoChanges>(() => async (ids) => (await undoChanges(workspaceId, conversation.id, ids)).results, [workspaceId, conversation.id])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread
-        onClose={onClose}
-        onNewChat={onNewChat}
-        runError={runError}
-        clearError={() => setRunError(null)}
-        onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
-      />
+      <UndoContext value={undo}>
+        <Thread
+          onClose={onClose}
+          onNewChat={onNewChat}
+          runError={runError}
+          clearError={() => setRunError(null)}
+          onStop={() => void stopConversation(workspaceId, conversation.id).catch(() => {})}
+        />
+      </UndoContext>
     </AssistantRuntimeProvider>
   )
 }
@@ -488,6 +494,7 @@ function Step(props: ToolCallMessagePartProps) {
   const { toolName, args, respondToApproval } = props
   const navigate = useNavigate()
   const names = useNames()
+  const submit = useAgUiSubmitInterruptResponses()
   const result = parseToolResult(props.result)
   const outcome = stepOutcome({ approval: props.approval, result, isError: props.isError, status: props.status })
   // the server's interrupt says how risky the change is and whether "Allow in this chat" may be offered
@@ -496,6 +503,16 @@ function Step(props: ToolCallMessagePartProps) {
   // the server's card of this result (or the summary at the end of a message), never built from the model's text
   const card = outcome === 'done' ? readCard(result, toolName) : null
   if (toolName === SUMMARY_TOOL) return card?.kind === 'summary' ? <SummaryCard card={card} /> : null
+  const batch = toolName === BATCH_TOOL ? readBatch(interrupt?.metadata?.batch) : null
+  if (outcome === 'waiting' && batch && interrupt) {
+    return (
+      <BatchApprovalCard
+        items={batch}
+        names={names}
+        onDecide={(decision) => void submit([{ interruptId: interrupt.id, status: 'resolved', payload: decision }])}
+      />
+    )
+  }
   if (outcome === 'waiting') {
     return (
       <ApprovalCard
@@ -509,7 +526,8 @@ function Step(props: ToolCallMessagePartProps) {
   const linkOnly = outcome === 'done' && notOpened(toolName, result)
   // only a link the server sent back opens a page, never one from the call's own arguments
   const open = outcome === 'done' && result !== null && typeof result === 'object' ? appPath((result as { url?: unknown }).url) : null
-  const line = outcome === 'declined' ? '' : card?.kind === 'tasks' ? (card.totals.tasks === 1 ? '1 result' : `${card.totals.tasks} results`) : resultLine(result)
+  const batchResult = toolName === BATCH_TOOL && outcome === 'done' ? readBatchResult(result) : null
+  const line = outcome === 'declined' ? '' : card?.kind === 'tasks' ? (card.totals.tasks === 1 ? '1 result' : `${card.totals.tasks} results`) : batchResult ? outcomeLine(batchResult) : resultLine(result)
   const note = line === view.subject || linkOnly ? '' : line
   const isChange = view.risk !== 'read'
   return (
@@ -545,20 +563,6 @@ function Step(props: ToolCallMessagePartProps) {
         </details>
       ) : null}
     </div>
-  )
-}
-
-function Fields({ fields, className }: { fields: StepField[]; className?: string }) {
-  return (
-    <dl className={cn('grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-md bg-muted/60 px-3 py-2 text-xs', className)}>
-      {fields.map((field) => (
-        <div key={field.label} className="contents">
-          <dt className="text-muted-foreground">{field.label}</dt>
-          {/* plain text, never rendered: fences and HTML stay visible */}
-          <dd className="max-h-60 min-w-0 overflow-y-auto font-mono break-words whitespace-pre-wrap text-foreground">{field.value}</dd>
-        </div>
-      ))}
-    </dl>
   )
 }
 

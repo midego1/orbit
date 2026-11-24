@@ -3,6 +3,7 @@
 // doc or the task list; anything else gives no link.
 
 import type { StatusCategory, TaskPriority } from '@/features/tasks/api/models'
+import type { StepRisk } from './toolSteps'
 
 export type CardStatus = { name: string; category: StatusCategory; color: string | null }
 
@@ -33,7 +34,21 @@ export type LinkItem = { title: string; href: string; updatedAt?: string | null;
 export type DocsCardData = { kind: 'docs'; items: LinkItem[] }
 export type ProjectsCardData = { kind: 'projects'; items: LinkItem[] }
 
-export type Change = { verb: string; key: string | null; title: string; href: string | null }
+export type ChangeOutcome = 'applied' | 'failed' | 'skipped'
+/** Whether a change can be undone now (the server's word; `undoing` while a request runs). */
+export type UndoState = 'available' | 'undoing' | 'undone' | 'conflict' | 'expired'
+export type Change = {
+  verb: string
+  key: string | null
+  title: string
+  href: string | null
+  /** A batch also lists the changes that failed or were not run. */
+  outcome: ChangeOutcome
+  /** Why a change failed or was not run (plain text). */
+  note: string
+  /** The server's undo record of an applied task change; `null` when it cannot be undone. */
+  undo: { id: string; state: UndoState } | null
+}
 export type SummaryCardData = { kind: 'summary'; changes: Change[] }
 
 export type CardData = TaskCardData | TasksCardData | DocsCardData | ProjectsCardData | SummaryCardData
@@ -43,6 +58,23 @@ export type ApprovalPreview = { kind: 'change'; task: TaskCardData; changes: Fie
 
 /** The step the server adds at the end of a message that made changes; it carries the summary card only. */
 export const SUMMARY_TOOL = 'orbit_summary'
+/** Several changes proposed together: one approval with a card per change (`engine.rs`). */
+export const BATCH_TOOL = 'propose_changes'
+
+/** One change of a waiting batch, as the server stored it: its id (made by the server), tool, exact arguments and
+    preview. The client answers with the ids it approves, never with values. */
+export type BatchItem = {
+  id: string
+  tool: string
+  risk: StepRisk
+  args: Record<string, unknown>
+  /** Text Orbit renders as Markdown or HTML elsewhere (a description, a comment): read it under Details. */
+  freeText: boolean
+  preview: ApprovalPreview | null
+}
+
+export type BatchItemOutcome = { id: string; tool: string; outcome: ChangeOutcome; detail: string }
+export type BatchResult = { items: BatchItemOutcome[]; applied: number; failed: number; skipped: number }
 
 /** The card kind each tool's result may carry (the server builds no other): a card on another step is ignored. */
 const CARD_KINDS: Record<string, CardData['kind']> = {
@@ -195,13 +227,74 @@ export function readCard(result: unknown, tool: string | undefined): CardData | 
       const changes = list(card.changes)
         .map(record)
         .flatMap((entry) =>
-          entry ? [{ verb: str(entry.verb, 40) || 'Changed', key: isTaskKey(entry.key) ? entry.key : null, title: str(entry.title), href: cardPath(entry.href) }] : [],
+          entry
+            ? [
+                {
+                  verb: str(entry.verb, 40) || 'Changed',
+                  key: isTaskKey(entry.key) ? entry.key : null,
+                  title: str(entry.title),
+                  href: cardPath(entry.href),
+                  outcome: outcomeOf(entry.outcome),
+                  note: str(entry.note),
+                  undo: undoOf(entry.undo),
+                },
+              ]
+            : [],
         )
       return changes.length ? { kind: 'summary', changes } : null
     }
     default:
       return null
   }
+}
+
+const OUTCOMES: readonly string[] = ['applied', 'failed', 'skipped']
+const UNDO_STATES: readonly string[] = ['available', 'undoing', 'undone', 'conflict', 'expired']
+
+function outcomeOf(value: unknown): ChangeOutcome {
+  return OUTCOMES.includes(value as string) ? (value as ChangeOutcome) : 'applied'
+}
+
+function undoOf(value: unknown): Change['undo'] {
+  const raw = record(value)
+  if (!raw || typeof raw.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(raw.id)) return null
+  return { id: raw.id, state: UNDO_STATES.includes(raw.state as string) ? (raw.state as UndoState) : 'expired' }
+}
+
+/** The batch on an approval (`metadata.batch.items`), checked: ids and tools of letters, digits, `_` and `-`. `null`
+    when it is not a batch or holds nothing usable. */
+export function readBatch(value: unknown): BatchItem[] | null {
+  const items = list(record(value)?.items)
+    .map(record)
+    .flatMap((entry) => {
+      if (!entry || typeof entry.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(entry.id)) return []
+      if (typeof entry.tool !== 'string' || !/^[a-z_]{1,64}$/.test(entry.tool)) return []
+      const risk: StepRisk = entry.risk === 'dangerous' ? 'dangerous' : 'write'
+      return [{ id: entry.id, tool: entry.tool, risk, args: record(entry.args) ?? {}, freeText: entry.freeText !== false, preview: readPreview(entry.preview) }]
+    })
+  return items.length ? items : null
+}
+
+/** What happened to each change of an answered batch (the `propose_changes` step's result). */
+export function readBatchResult(result: unknown): BatchResult | null {
+  const batch = record(record(result)?.batch)
+  if (!batch) return null
+  return {
+    items: list(batch.items)
+      .map(record)
+      .flatMap((entry) => (entry ? [{ id: str(entry.id, 64), tool: str(entry.tool, 64), outcome: outcomeOf(entry.outcome), detail: str(entry.error) || str(entry.reason) }] : [])),
+    applied: count(batch.applied),
+    failed: count(batch.failed),
+    skipped: count(batch.skipped),
+  }
+}
+
+/** "3 applied · 1 failed · 4 not run", leaving out what is zero. */
+export function outcomeLine(counts: { applied: number; failed: number; skipped: number }): string {
+  const parts = [`${counts.applied} applied`]
+  if (counts.failed) parts.push(`${counts.failed} failed`)
+  if (counts.skipped) parts.push(`${counts.skipped} not run`)
+  return parts.join(' · ')
 }
 
 /** The preview the server put on an approval (`metadata.preview`), checked. */

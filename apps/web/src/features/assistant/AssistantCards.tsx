@@ -1,16 +1,20 @@
 // The cards Ask AI shows for tool results (`cards.ts`). Every text in them is plain text in a React text node, never
 // Markdown or HTML, and every link is a checked in-app path (`cardPath`).
-import { useState, type ReactNode } from 'react'
+import { useContext, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { ArrowRight, DocumentText, Folder2, TickCircle } from 'reicon-react'
+import { ArrowRight, CloseCircle, DocumentText, Folder2, MinusCircle, TickCircle, Undo } from 'reicon-react'
 import { cn } from 'cn'
 import { Tip } from '@/components/common/Tip'
+import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
 import { UserAvatar } from '@/components/common/UserAvatar'
 import { relativeTime } from '@/lib/format'
 import { PriorityIcon } from '@/features/tasks/components/PriorityIcon'
 import { TaskStatusIcon } from '@/features/tasks/components/TaskStatusIcon'
 import { PRIORITY_LABEL } from '@/features/tasks/taskMeta'
-import { groupTasks, totalsLine, isDone, type ApprovalPreview, type CardData, type CardStatus, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData } from './cards'
+import { groupTasks, outcomeLine, totalsLine, isDone, type ApprovalPreview, type CardData, type CardStatus, type Change, type KnownTask, type LinkItem, type SummaryCardData, type TaskCardData, type TasksCardData, type UndoState } from './cards'
+import { UndoContext } from './undoContext'
+import type { StepField } from './toolSteps'
 
 /** Rows shown before "Show all". */
 const LIST_PREVIEW = 5
@@ -170,38 +174,129 @@ function LinkList({ items, icon, label }: { items: LinkItem[]; icon: ReactNode; 
   )
 }
 
+type UndoView = { state: UndoState; message: string }
+
+/** The undo state the server answered, as the row shows it. */
+function undoView(outcome: string, message: string): UndoView {
+  switch (outcome) {
+    case 'undone':
+    case 'already_undone':
+      return { state: 'undone', message: outcome === 'undone' ? message : '' }
+    case 'conflict':
+    case 'uncertain':
+      return { state: 'conflict', message }
+    case 'expired':
+    case 'not_found':
+      return { state: 'expired', message }
+    default:
+      return { state: 'available', message }
+  }
+}
+
+/** The end of a message that made changes: one row per change (a batch also lists what failed or did not run), each
+    applied task change with Undo while the server allows it, and Undo all. */
 export function SummaryCard({ card }: { card: SummaryCardData }) {
-  const n = card.changes.length
+  const undo = useContext(UndoContext)
+  const [views, setViews] = useState<Record<string, UndoView>>({})
+  const view = (change: Change): UndoView | null => (change.undo ? (views[change.undo.id] ?? { state: change.undo.state, message: '' }) : null)
+  const applied = card.changes.filter((change) => change.outcome === 'applied').length
+  const failed = card.changes.filter((change) => change.outcome === 'failed').length
+  const skipped = card.changes.filter((change) => change.outcome === 'skipped').length
+  const undoable = card.changes.flatMap((change) => (change.undo && view(change)?.state === 'available' ? [change.undo.id] : []))
+  const busy = card.changes.some((change) => view(change)?.state === 'undoing')
+
+  async function run(ids: string[]) {
+    if (!undo || ids.length === 0) return
+    setViews((old) => ({ ...old, ...Object.fromEntries(ids.map((id) => [id, { state: 'undoing' as const, message: '' }])) }))
+    try {
+      const results = await undo(ids)
+      setViews((old) => {
+        const next = { ...old }
+        for (const id of ids) {
+          const result = results.find((entry) => entry.id === id)
+          next[id] = result ? undoView(result.outcome, result.message) : { state: 'available', message: 'Not undone. Try again.' }
+        }
+        return next
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Not undone. Try again.'
+      setViews((old) => ({ ...old, ...Object.fromEntries(ids.map((id) => [id, { state: 'available' as const, message }])) }))
+    }
+  }
+
+  const heading = failed || skipped ? outcomeLine({ applied, failed, skipped }) : applied === 1 ? '1 change applied' : `${applied} changes applied`
   return (
     <section data-slot="summary-card" aria-label="Changes applied" className="flex flex-col gap-1 rounded-lg border bg-card px-3 py-2">
-      <p className="flex items-center gap-1.5 text-[0.8125rem] font-medium text-foreground">
-        <TickCircle className="size-4 text-primary" aria-hidden="true" />
-        {n === 1 ? '1 change applied' : `${n} changes applied`}
-      </p>
+      <div className="flex min-w-0 items-center gap-1.5">
+        {failed ? <CloseCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" /> : <TickCircle className="size-4 shrink-0 text-primary" aria-hidden="true" />}
+        <p className="min-w-0 flex-1 text-[0.8125rem] font-medium text-foreground">{heading}</p>
+        {undo && undoable.length > 1 ? (
+          <Button size="xs" variant="outline" data-assistant-undo-all disabled={busy} onClick={() => void run(undoable)}>
+            <Undo />
+            Undo all
+          </Button>
+        ) : null}
+      </div>
       <ul className="flex flex-col">
-        {card.changes.map((change, index) => {
-          const content = (
-            <>
-              <span className="shrink-0 text-muted-foreground">{change.verb}</span>
-              {change.key ? <span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground">{change.key}</span> : null}
-              <span className="min-w-0 flex-1 truncate text-foreground">{change.title}</span>
-              {change.href ? <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
-            </>
-          )
-          return (
-            <li key={index}>
-              {change.href ? (
-                <Link to={change.href} className={cn('flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-xs hover:bg-muted', linkRing)}>
-                  {content}
-                </Link>
-              ) : (
-                <span className="flex min-w-0 items-center gap-2 px-1 py-0.5 text-xs">{content}</span>
-              )}
-            </li>
-          )
-        })}
+        {card.changes.map((change, index) => (
+          <SummaryRow key={index} change={change} view={view(change)} canUndo={!!undo && !busy} onUndo={(id) => void run([id])} />
+        ))}
       </ul>
     </section>
+  )
+}
+
+function SummaryRow({ change, view, canUndo, onUndo }: { change: Change; view: UndoView | null; canUndo: boolean; onUndo: (id: string) => void }) {
+  const applied = change.outcome === 'applied'
+  const undone = view?.state === 'undone'
+  const content = (
+    <>
+      {change.outcome === 'failed' ? <CloseCircle className="size-3.5 shrink-0 text-destructive" aria-hidden="true" /> : change.outcome === 'skipped' ? <MinusCircle className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+      <span className="shrink-0 text-muted-foreground">{change.verb}</span>
+      {change.key ? <span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground">{change.key}</span> : null}
+      <span className={cn('min-w-0 flex-1 truncate', applied ? 'text-foreground' : 'text-muted-foreground', undone && 'line-through decoration-muted-foreground/60')}>{change.title}</span>
+      {change.href && applied ? <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+    </>
+  )
+  const label = change.key ?? change.title
+  return (
+    <li data-change-outcome={change.outcome} className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 items-center gap-1">
+        {change.href && applied ? (
+          <Link to={change.href} className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-xs hover:bg-muted', linkRing)}>
+            {content}
+          </Link>
+        ) : (
+          <span className="flex min-w-0 flex-1 items-center gap-2 px-1 py-0.5 text-xs">{content}</span>
+        )}
+        {change.undo && view ? (
+          view.state === 'available' && canUndo ? (
+            <Button size="xs" variant="ghost" data-assistant-undo aria-label={`Undo: ${change.verb} ${label}`} className="shrink-0 text-muted-foreground" onClick={() => onUndo(change.undo!.id)}>
+              Undo
+            </Button>
+          ) : view.state === 'undoing' ? (
+            <span className="flex shrink-0 items-center gap-1 px-1 text-[0.6875rem] text-muted-foreground">
+              <Spinner role="presentation" aria-hidden aria-label={undefined} className="size-3" />
+              Undoing…
+            </span>
+          ) : view.state === 'undone' ? (
+            <span className="shrink-0 px-1 text-[0.6875rem] text-muted-foreground">Undone</span>
+          ) : view.state === 'expired' ? (
+            <Tip label="Changes can be undone for 24 hours, in the same chat.">
+              <span className="shrink-0 px-1 text-[0.6875rem] text-muted-foreground">Undo expired</span>
+            </Tip>
+          ) : view.state === 'conflict' ? (
+            <span className="shrink-0 px-1 text-[0.6875rem] text-muted-foreground">Can’t undo</span>
+          ) : null
+        ) : null}
+      </div>
+      {change.note && !applied ? <p className="ml-6 text-[0.6875rem] break-words text-muted-foreground">{change.outcome === 'failed' ? `Failed: ${change.note}` : `Not run: ${change.note}`}</p> : null}
+      {view?.message && view.state !== 'undone' ? (
+        <p role="alert" className={cn('ml-1 text-[0.6875rem] break-words', view.state === 'conflict' ? 'text-amber-700 dark:text-amber-400' : 'text-destructive')}>
+          {view.message}
+        </p>
+      ) : null}
+    </li>
   )
 }
 
@@ -274,3 +369,18 @@ export function TaskChip({ task, text }: { task: KnownTask; text: string }) {
   )
 }
 
+
+/** A change's arguments: plain text, never rendered (fences and HTML stay visible). */
+export function Fields({ fields, className }: { fields: StepField[]; className?: string }) {
+  return (
+    <dl className={cn('grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-md bg-muted/60 px-3 py-2 text-xs', className)}>
+      {fields.map((field) => (
+        <div key={field.label} className="contents">
+          <dt className="text-muted-foreground">{field.label}</dt>
+          {/* plain text, never rendered: fences and HTML stay visible */}
+          <dd className="max-h-60 min-w-0 overflow-y-auto font-mono break-words whitespace-pre-wrap text-foreground">{field.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}

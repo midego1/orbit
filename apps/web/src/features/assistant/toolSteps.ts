@@ -43,6 +43,7 @@ const STEP_TITLES: Record<string, string> = {
   open_page: 'Opened a page',
   navigate: 'Opened a page',
   load_tools: 'Loaded more tools',
+  propose_changes: 'Changes',
   create_task: 'Create task',
   update_task: 'Update task',
   restore_task: 'Restore task',
@@ -108,7 +109,7 @@ const ALWAYS_ASKED = new Set([
 
 export function fallbackRisk(tool: string): StepRisk {
   if (ALWAYS_ASKED.has(tool) || /^(delete|trash|purge|empty)_/.test(tool)) return 'dangerous'
-  if (/^(create|update|restore|move|duplicate|set|add|remove|reorder|mark)_/.test(tool)) return 'write'
+  if (/^(create|update|restore|move|duplicate|set|add|remove|reorder|mark|propose)_/.test(tool)) return 'write'
   return 'read'
 }
 
