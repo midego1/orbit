@@ -4435,7 +4435,7 @@ async fn continuing_the_open_chat_also_starts_it_afresh() {
         .await
         .unwrap()
         .unwrap();
-    let view = super::conversation_view(&open, now);
+    let view = super::conversation_view(&open, None, now);
     assert!(view.to_string().contains("interrupts"));
     let Switch::Done(resumed) = store
         .resume(conversation.id, w.workspace, w.owner, at(now, 1_000))
@@ -4448,7 +4448,7 @@ async fn continuing_the_open_chat_also_starts_it_afresh() {
     assert!(resumed.state.pending.is_none());
     assert!(resumed.state.allowed_tools.is_empty());
     assert!(
-        !super::conversation_view(&resumed, now)
+        !super::conversation_view(&resumed, None, now)
             .to_string()
             .contains("interrupts")
     );
@@ -4498,7 +4498,7 @@ async fn an_archived_conversation_never_shows_an_approval_card() {
         .unwrap();
     assert!(archived.state.pending.is_some());
     assert!(
-        !super::conversation_view(&archived, now)
+        !super::conversation_view(&archived, None, now)
             .to_string()
             .contains("interrupts")
     );
