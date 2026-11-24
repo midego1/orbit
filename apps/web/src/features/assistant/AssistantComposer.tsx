@@ -1,7 +1,7 @@
 // The Ask AI composer: the message field with its "/" command menu and "@" mention picker, the mentions as chips, and
 // the send and stop buttons. A command only writes a prompt (or starts a new chat); a mention only names an item by its
 // id, which the server reads again with the member's own access. Every label is plain text.
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import { useLocation } from 'react-router'
 import { ArrowUp, DocumentText, Folder, Stop, TaskSquare, User, Xmark } from 'reicon-react'
 import { cn } from 'cn'
@@ -9,20 +9,12 @@ import { Tip } from '@/components/common/Tip'
 import { UserAvatar } from '@/components/common/UserAvatar'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import { useDebouncedValue } from '@/lib/useDebouncedValue'
-import { usePageSearch } from '@/features/docs/api/pages'
-import { useRecentPages } from '@/features/docs/api/pageOptions'
-import { useProjects } from '@/features/tasks/api/projects'
 import { TaskStatusIcon } from '@/features/tasks/components/TaskStatusIcon'
-import { looksLikeTaskId, useTaskReferences, type TaskReference } from '@/features/tasks/taskReferences'
-import { useTeamMembers } from '@/features/workspaces/api'
-import type { User as Member } from '@/features/workspaces/models'
 import {
   commandPrompt,
   insertMention,
   matchingCommands,
   MAX_MENTIONS,
-  mentionLabel,
   mentionQuery,
   mentionsToSend,
   parseSlash,
@@ -31,62 +23,7 @@ import {
   type MentionKind,
   type SlashCommand,
 } from './composer'
-
-/** One row of the "@" picker. */
-export interface MentionOption {
-  mention: Mention
-  /** The item's own name (a task's title), shown next to the label. */
-  title: string
-  detail?: string
-  task?: TaskReference
-  member?: Member
-}
-
-const GROUP: Record<MentionKind, string> = { task: 'Tasks', project: 'Projects', doc: 'Docs', person: 'People' }
-const PER_GROUP = 4
-const MAX_OPTIONS = 12
-
-const matches = (query: string, ...values: (string | undefined)[]) => {
-  const needle = query.trim().toLowerCase()
-  return !needle || values.some((value) => value?.toLowerCase().includes(needle))
-}
-
-/** The picker's rows for "@query": tasks, projects, docs and people, from the same searches as the rest of the app. */
-export function useMentionOptions(workspaceId: string, query: string | null): { options: MentionOption[]; loading: boolean } {
-  const open = query !== null
-  const debounced = useDebouncedValue(query, 150)
-  const search = (debounced ?? '').trim()
-  const tasks = useTaskReferences(workspaceId, search, open && debounced !== null)
-  const pages = usePageSearch(workspaceId, open ? search : '')
-  const recent = useRecentPages(workspaceId, open && !search, PER_GROUP)
-  const projects = useProjects(workspaceId, open)
-  const members = useTeamMembers(open ? workspaceId : null)
-  const options = useMemo(() => {
-    if (query === null) return []
-    const q = query.trim()
-    const taskRows: MentionOption[] = (tasks.data ?? []).slice(0, PER_GROUP).map((task) => ({
-      mention: { kind: 'task', id: task.id, label: mentionLabel('task', task.title, task.identifier) },
-      title: task.title,
-      detail: task.projectName,
-      task,
-    }))
-    const projectRows: MentionOption[] = (projects.data ?? [])
-      .filter((project) => matches(q, project.name, project.key))
-      .slice(0, PER_GROUP)
-      .map((project) => ({ mention: { kind: 'project', id: project.id, label: mentionLabel('project', project.name) }, title: project.name, detail: project.key }))
-    const docRows: MentionOption[] = (search ? (pages.data ?? []) : (recent.data ?? []))
-      .slice(0, PER_GROUP)
-      .map((page) => ({ mention: { kind: 'doc', id: page.id, label: mentionLabel('doc', page.title || 'Untitled') }, title: page.title || 'Untitled', detail: page.database_title ?? undefined }))
-    const people: MentionOption[] = (members.data ?? [])
-      .filter((member) => matches(q, member.name, member.handle))
-      .slice(0, PER_GROUP)
-      .map((member) => ({ mention: { kind: 'person', id: member.id, label: mentionLabel('person', member.name) }, title: member.name, detail: member.handle, member }))
-    const groups = looksLikeTaskId(q) ? [taskRows, projectRows, docRows, people] : [people, taskRows, projectRows, docRows]
-    return groups.flat().slice(0, MAX_OPTIONS)
-  }, [query, search, tasks.data, projects.data, pages.data, recent.data, members.data])
-  const loading = open && (debounced !== query || tasks.isFetching || pages.isFetching)
-  return { options, loading }
-}
+import { GROUP, useMentionOptions, type MentionOption } from './mentionOptions'
 
 type Menu =
   | { type: 'slash'; items: SlashCommand[] }
