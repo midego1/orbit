@@ -8,8 +8,6 @@
 //!   update gets its previous values back (`update_task`). Only while the task still has the version Ask AI's change
 //!   left (nobody changed it since), only within 24 hours, and only once.
 
-use std::collections::HashMap;
-
 use futures_util::future::BoxFuture;
 use serde_json::{Map, Value, json};
 
@@ -70,6 +68,7 @@ pub(crate) fn record_create(created: &Value, key: Option<&str>, now: i64) -> Opt
         created_at: now,
         expires_at: now + UNDO_TTL_MS,
         state: UndoState::Available,
+        undone_version: None,
     })
 }
 
@@ -119,6 +118,7 @@ pub(crate) fn record_update(
         created_at: now,
         expires_at: now + UNDO_TTL_MS,
         state: UndoState::Available,
+        undone_version: None,
     })
 }
 
@@ -180,12 +180,13 @@ fn is_gone(error: &str) -> bool {
     lower.contains("resource is not available") || lower.contains("not found")
 }
 
-/// Undoes one record as the member. `chain` holds, per task, the version an undo of a later change in this same
-/// request left and the version that change was made against: then the earlier change may follow.
+/// Undoes one record as the member. `after_later_undo`: when the next Ask AI change to the same task was undone
+/// already, the version that change was made against and the version its undo left; then this change may follow while
+/// the task still has the version that undo left.
 async fn undo_one<T: ToolRunner>(
     tools: &T,
     record: &UndoRecord,
-    chain: &HashMap<String, (u64, u64)>,
+    after_later_undo: Option<(u64, u64)>,
 ) -> Result<Option<u64>, Failure> {
     let current = match tools
         .lookup("get_task", json!({"task_id": record.task_id}))
@@ -212,12 +213,11 @@ async fn undo_one<T: ToolRunner>(
             name(record)
         )));
     };
-    let unchanged = version == record.after_version
-        || chain
-            .get(&record.task_id)
-            .is_some_and(|(made_against, left)| {
-                *made_against == record.after_version && version == *left
-            });
+    let unchanged = match after_later_undo {
+        // the later change is undone: the task must be as that undo left it, and that change was made on top of this one
+        Some((made_against, left)) => made_against == record.after_version && version == left,
+        None => version == record.after_version,
+    };
     if !unchanged {
         return Err(Failure::Conflict(changed_since(record)));
     }
@@ -249,13 +249,21 @@ async fn undo_one<T: ToolRunner>(
                 )));
             }
         }
-        tools
+        let deleted = tools
             .call(
                 "delete_task",
                 json!({"task_id": record.task_id, "expected_version": version, "permanent": false}),
             )
             .await
-            .map(|_| None)
+            .map(|_| None);
+        if deleted.is_ok() && trashed_with_sub_issues(tools, &record.task_id).await {
+            // a sub-issue was added between the check and the delete: put it all back as it was
+            return Err(Failure::Conflict(format!(
+                "{} got sub-issues while it was being undone, so it was put back from the trash. Delete it yourself if you want it gone.",
+                name(record)
+            )));
+        }
+        deleted
     } else {
         let mut arguments = record.restore.as_object().cloned().unwrap_or_default();
         arguments.insert("task_id".into(), json!(record.task_id));
@@ -281,6 +289,44 @@ async fn undo_one<T: ToolRunner>(
             ))
         }
     })
+}
+
+/// After an undo moved a task to the trash: whether sub-issues went with it (one was added after the check). If so,
+/// the task is restored with them, and `true` is returned. A trash that cannot be read counts as none.
+async fn trashed_with_sub_issues<T: ToolRunner>(tools: &T, task_id: &str) -> bool {
+    let mut cursor: Option<String> = None;
+    // the newest trash comes first; a few pages at most
+    for _ in 0..3 {
+        let mut input = json!({"limit": 100});
+        if let Some(cursor) = &cursor {
+            input["cursor"] = json!(cursor);
+        }
+        let Ok(page) = tools.lookup("list_task_trash", input).await else {
+            return false;
+        };
+        if let Some(item) = page["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["id"] == task_id)
+        {
+            if item["trashed_descendant_count"].as_i64().unwrap_or(0) == 0 {
+                return false;
+            }
+            let restored = tools
+                .call(
+                    "restore_task",
+                    json!({"task_id": task_id, "expected_version": item["version"]}),
+                )
+                .await;
+            return restored.is_ok();
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            return false;
+        }
+    }
+    false
 }
 
 /// Undoes the records `ids` names (newest first, so "Undo all" can take back two changes to the same task), with the
@@ -312,7 +358,6 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
         }
     }
     positions.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
-    let mut chain: HashMap<String, (u64, u64)> = HashMap::new();
     let mut undone = Vec::new();
     let mut broken = false;
     for (position, id) in positions {
@@ -344,17 +389,37 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
             results.push(json!({"id": id, "outcome": outcome, "message": message}));
             continue;
         }
-        // a later change by Ask AI to the same task that is still in place: that one goes first
-        let later = state.undo[position + 1..]
+        // a later change by Ask AI to the same task goes first; once it is undone, this one may follow
+        let next = state.undo[position + 1..]
             .iter()
-            .any(|other| other.task_id == record.task_id && other.state != UndoState::Undone);
-        if later {
-            results.push(json!({"id": id, "outcome": "conflict", "message": format!(
-                "{} was changed again by Ask AI after this change; undo that later change first.",
-                name(&record)
-            )}));
-            continue;
-        }
+            .find(|other| other.task_id == record.task_id);
+        let after_later_undo = match next {
+            None => None,
+            Some(later) if later.state == UndoState::Undone => {
+                match (later.before_version, later.undone_version) {
+                    (Some(made_against), Some(left)) => Some((made_against, left)),
+                    _ => {
+                        results.push(json!({"id": id, "outcome": "conflict", "message": changed_since(&record)}));
+                        continue;
+                    }
+                }
+            }
+            Some(later) => {
+                let message = if later.state == UndoState::Available && now <= later.expires_at {
+                    format!(
+                        "{} was changed again by Ask AI after this change; undo that later change first.",
+                        name(&record)
+                    )
+                } else {
+                    format!(
+                        "{} was changed again by Ask AI after this change, and that later change can no longer be undone, so this one cannot either.",
+                        name(&record)
+                    )
+                };
+                results.push(json!({"id": id, "outcome": "conflict", "message": message}));
+                continue;
+            }
+        };
         state.undo[position].state = UndoState::Undoing;
         if !saver.save(state).await {
             state.undo[position].state = UndoState::Available;
@@ -362,12 +427,10 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
             results.push(json!({"id": id, "outcome": "failed", "message": "Not undone: the conversation could not be saved. Try again."}));
             continue;
         }
-        match undo_one(tools, &record, &chain).await {
+        match undo_one(tools, &record, after_later_undo).await {
             Ok(left) => {
                 state.undo[position].state = UndoState::Undone;
-                if let (Some(made_against), Some(left)) = (record.before_version, left) {
-                    chain.insert(record.task_id.clone(), (made_against, left));
-                }
+                state.undo[position].undone_version = left;
                 undone.push(if record.tool == "create_task" {
                     format!("created task {} (now in the trash)", name(&record))
                 } else {

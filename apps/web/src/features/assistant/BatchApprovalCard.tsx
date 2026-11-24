@@ -7,12 +7,12 @@ import { InfoTip } from '@/components/common/InfoTip'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Fields, PreviewCard } from './AssistantCards'
-import type { BatchItem } from './cards'
+import { detailsOpen, type BatchItem } from './cards'
 import { describeStep } from './toolSteps'
 
 export type BatchDecision = { approved: true; items: string[] } | { approved: false }
 
-export function BatchApprovalCard({ items, names, onDecide }: { items: BatchItem[]; names?: ReadonlyMap<string, string>; onDecide: (decision: BatchDecision) => void }) {
+export function BatchApprovalCard({ items, names, onDecide }: { items: BatchItem[]; names?: ReadonlyMap<string, string>; onDecide: (decision: BatchDecision) => void | Promise<void> }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(items.map((item) => item.id)))
   const [sent, setSent] = useState(false)
   const count = items.filter((item) => selected.has(item.id)).length
@@ -31,7 +31,12 @@ export function BatchApprovalCard({ items, names, onDecide }: { items: BatchItem
   function decide(decision: BatchDecision) {
     if (sent) return
     setSent(true)
-    onDecide(decision)
+    // the answer did not go through (a lost connection): the card can be answered again
+    try {
+      void Promise.resolve(onDecide(decision)).catch(() => setSent(false))
+    } catch {
+      setSent(false)
+    }
   }
 
   return (
@@ -104,7 +109,7 @@ function BatchRow({ item, number, names, checked, disabled, onToggle }: {
         {item.preview ? <PreviewCard preview={item.preview} /> : null}
         {fields.length ? <Fields fields={fields} /> : null}
         {details.length ? (
-          <details className="text-xs">
+          <details className="text-xs" open={item.freeText || detailsOpen(item.tool, item.args, item.preview !== null)}>
             <summary className="cursor-pointer text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground">Details</summary>
             <Fields fields={details} className="mt-1" />
           </details>

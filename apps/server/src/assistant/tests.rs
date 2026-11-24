@@ -3336,6 +3336,10 @@ async fn an_applied_update_records_its_undo_from_the_task_read_right_before() {
 struct VersionedTasks {
     tasks: Mutex<std::collections::HashMap<String, Value>>,
     calls: Mutex<Vec<(String, Value)>>,
+    /// Trashed tasks, with the sub-issues that went with them.
+    trash: Mutex<std::collections::HashMap<String, Value>>,
+    /// A sub-issue appears right after the check, before the delete (the race the recheck closes).
+    sub_issue_sneaks_in: bool,
 }
 
 impl ToolRunner for VersionedTasks {
@@ -3347,6 +3351,17 @@ impl ToolRunner for VersionedTasks {
                 .push((name.to_owned(), input.clone()));
             let mut tasks = self.tasks.lock().unwrap();
             let id = input["task_id"].as_str().unwrap_or_default().to_owned();
+            if name == "restore_task" {
+                let mut trashed = self
+                    .trash
+                    .lock()
+                    .unwrap()
+                    .remove(&id)
+                    .ok_or("not in the trash")?;
+                trashed["version"] = json!(trashed["version"].as_u64().unwrap() + 1);
+                tasks.insert(id, trashed.clone());
+                return Ok(trashed);
+            }
             let Some(task) = tasks.get_mut(&id) else {
                 return Err("Task resource is not available".into());
             };
@@ -3364,7 +3379,10 @@ impl ToolRunner for VersionedTasks {
                     Ok(task.clone())
                 }
                 "delete_task" => {
-                    tasks.remove(&id);
+                    let mut trashed = tasks.remove(&id).unwrap();
+                    trashed["trashed_descendant_count"] =
+                        json!(i64::from(self.sub_issue_sneaks_in));
+                    self.trash.lock().unwrap().insert(id, trashed);
                     Ok(json!({"deleted": true}))
                 }
                 _ => Err("unknown".into()),
@@ -3383,6 +3401,10 @@ impl ToolRunner for VersionedTasks {
                     .cloned()
                     .ok_or_else(|| "Task resource is not available".into()),
                 "list_tasks" => Ok(json!({"items": []})),
+                "list_task_trash" => Ok(json!({
+                    "items": self.trash.lock().unwrap().values().cloned().collect::<Vec<_>>(),
+                    "next_cursor": null,
+                })),
                 _ => Err("unknown".into()),
             }
         })
@@ -3429,6 +3451,7 @@ fn record(
         created_at: 0,
         expires_at: i64::MAX,
         state: super::store::UndoState::Available,
+        undone_version: None,
     }
 }
 
@@ -4104,5 +4127,182 @@ async fn an_undo_after_24_hours_is_refused() {
     assert_eq!(
         none.err().map(|response| response.status()),
         Some(StatusCode::UNPROCESSABLE_ENTITY)
+    );
+}
+
+#[tokio::test]
+async fn two_changes_to_one_task_can_be_undone_in_two_separate_requests() {
+    use super::undo::undo;
+    let tools = VersionedTasks::default();
+    tools.tasks.lock().unwrap().insert(
+        "t1".into(),
+        json!({"id": "t1", "version": 2, "title": "Renamed", "recurrence": null}),
+    );
+    let mut state = state_with(vec![
+        record("u-create", "create_task", "t1", None, 1, Value::Null),
+        record(
+            "u-rename",
+            "update_task",
+            "t1",
+            Some(1),
+            2,
+            json!({"title": "First"}),
+        ),
+    ]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    // as the refusal says: the later change first, one click
+    let first = undo(&mut state, &["u-rename".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&first), [("u-rename".into(), "undone".into())]);
+    assert_eq!(state.undo[1].undone_version, Some(3));
+    // then the earlier one, in a request of its own
+    let second = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&second), [("u-create".into(), "undone".into())]);
+    assert!(tools.tasks.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_earlier_change_waits_for_a_later_one_that_can_no_longer_be_undone() {
+    use super::undo::undo;
+    let tools = VersionedTasks::default();
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t1".into(), json!({"id": "t1", "version": 2}));
+    let mut later = record(
+        "u-rename",
+        "update_task",
+        "t1",
+        Some(1),
+        2,
+        json!({"title": "First"}),
+    );
+    later.expires_at = 5;
+    let mut state = state_with(vec![
+        record("u-create", "create_task", "t1", None, 1, Value::Null),
+        later,
+    ]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("can no longer be undone")
+    );
+    // a later change the task moved on from since its undo: changed since
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t2".into(), json!({"id": "t2", "version": 9}));
+    let mut undone = record(
+        "u-b",
+        "update_task",
+        "t2",
+        Some(1),
+        2,
+        json!({"title": "A"}),
+    );
+    undone.state = super::store::UndoState::Undone;
+    undone.undone_version = Some(3);
+    let mut state = state_with(vec![
+        record("u-a", "create_task", "t2", None, 1, Value::Null),
+        undone,
+    ]);
+    let results = undo(&mut state, &["u-a".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-a".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was changed after")
+    );
+}
+
+#[tokio::test]
+async fn a_sub_issue_added_during_the_undo_of_a_create_puts_the_task_back() {
+    use super::undo::undo;
+    let tools = VersionedTasks {
+        sub_issue_sneaks_in: true,
+        ..VersionedTasks::default()
+    };
+    tools
+        .tasks
+        .lock()
+        .unwrap()
+        .insert("t1".into(), json!({"id": "t1", "version": 1}));
+    let mut state = state_with(vec![record(
+        "u-create",
+        "create_task",
+        "t1",
+        None,
+        1,
+        Value::Null,
+    )]);
+    let saves = Saves {
+        ok: true,
+        count: Mutex::new(0),
+    };
+    let results = undo(&mut state, &["u-create".into()], &tools, &saves, 10).await;
+    assert_eq!(outcomes(&results), [("u-create".into(), "conflict".into())]);
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("put back from the trash")
+    );
+    assert!(tools.tasks.lock().unwrap().contains_key("t1"), "restored");
+    assert!(tools.trash.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn each_change_of_a_batch_counts_toward_the_messages_tool_calls() {
+    let mut harness = Harness::new(vec![
+        tool(
+            "toolu_b",
+            "propose_changes",
+            &creates(&["One", "Two", "Three", "Four"]),
+        ),
+        text("Too many."),
+    ])
+    .await;
+    harness.limits.max_tool_calls = 3;
+    let mut state = state();
+    let (outcome, _) = harness.run(&mut state, ask("four")).await;
+    assert_eq!(outcome, Outcome::Finished);
+    assert!(state.pending.is_none());
+    let told = last_tool_result(&harness.fake.requests()[1]);
+    assert!(
+        told["content"]
+            .as_str()
+            .unwrap()
+            .contains("at most 3 tool calls")
+    );
+    // within the cap the batch waits, and its changes are counted
+    let mut harness = Harness::new(vec![tool(
+        "toolu_b",
+        "propose_changes",
+        &creates(&["One", "Two", "Three"]),
+    )])
+    .await;
+    harness.limits.max_tool_calls = 3;
+    let mut state = state();
+    assert_eq!(
+        harness.run(&mut state, ask("three")).await.0,
+        Outcome::Paused
+    );
+    assert_eq!(state.turn.tool_calls, 3);
+    // the approval id carries a part the server made, not only the model's call id
+    let interrupt = state.pending.as_ref().unwrap().interrupt_id.clone();
+    assert!(
+        interrupt.starts_with("approve:toolu_b:") && interrupt.len() > "approve:toolu_b:".len()
     );
 }

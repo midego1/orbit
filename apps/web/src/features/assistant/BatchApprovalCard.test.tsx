@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { fireEvent, render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { BatchApprovalCard, type BatchDecision } from './BatchApprovalCard'
-import { readBatch, type BatchItem } from './cards'
+import { detailsOpen, readBatch, type BatchItem } from './cards'
 
 const W = '0193aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee'
 
@@ -19,7 +19,7 @@ function batch(): BatchItem[] {
     id: `c${i + 1}`,
     tool: 'create_task',
     risk: 'write',
-    freeText: true,
+    freeText: false,
     args: { project_id: 'p1', status_id: 's1', title: `Task ${i + 1}` },
     preview: preview(i + 1),
   }))
@@ -126,4 +126,40 @@ test('a batch from the server is checked: bad ids and tools are dropped', () => 
   expect(items?.[1].freeText).toBe(true)
   expect(readBatch({ items: [] })).toBeNull()
   expect(readBatch(null)).toBeNull()
+})
+
+test('Details open at once for rich text or arguments the preview does not show, and stay folded otherwise', () => {
+  const view = show()
+  const open = (id: string) => (view.container.querySelector(`[data-batch-item="${id}"] details`) as HTMLDetailsElement | null)?.open
+  // c7 writes a description: open
+  expect(open('c7')).toBe(true)
+  // c1: a create whose preview shows every argument: folded
+  expect(open('c1')).toBe(false)
+  expect(detailsOpen('create_task', { project_id: 'p', status_id: 's', title: 'T' }, true)).toBe(false)
+  // an argument the preview card does not show, such as a parent or a recurrence
+  expect(detailsOpen('create_task', { project_id: 'p', status_id: 's', title: 'T', parent_task_id: 'GEN-1' }, true)).toBe(true)
+  expect(detailsOpen('update_task', { task_id: 't', expected_version: 1, recurrence: null }, true)).toBe(true)
+  expect(detailsOpen('update_task', { task_id: 't', expected_version: 1, status_id: 's' }, true)).toBe(false)
+  // rich text of any change, preview or not; an empty description is not text
+  expect(detailsOpen('create_comment', { task_id: 't', body: 'hi' }, false)).toBe(true)
+  expect(detailsOpen('create_task', { project_id: 'p', status_id: 's', title: 'T', description: '' }, true)).toBe(false)
+})
+
+test('an answer that did not go through lets the batch be answered again', async () => {
+  let calls = 0
+  const view = render(
+    <MemoryRouter>
+      <BatchApprovalCard
+        items={batch()}
+        onDecide={async () => {
+          calls += 1
+          throw new Error('offline')
+        }}
+      />
+    </MemoryRouter>,
+  )
+  fireEvent.click(approve(view as never))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(calls).toBe(1)
+  expect(approve(view as never).disabled).toBe(false)
 })

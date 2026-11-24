@@ -232,3 +232,12 @@ test('summary entries are checked: a bad undo id or state is not trusted', () =>
   const old = summary([{ verb: 'Created', key: 'LCH-1', title: 'One', href: null }]) as Extract<CardData, { kind: 'summary' }>
   expect(old.changes[0].outcome).toBe('applied')
 })
+
+test('an undo the server saw cut off shows as "Can’t undo" and does not lock the other changes', () => {
+  const view = showUndo(summary([applied(1, { id: 'u1', state: 'undoing' }), applied(2)]), async () => [])
+  expect(view.queryByText('Undoing…')).toBeNull()
+  expect(view.getByText('Can’t undo')).toBeTruthy()
+  expect(view.getByRole('alert').textContent).toContain('cut off')
+  const other = view.getByRole('button', { name: 'Undo: Updated LCH-2' }) as HTMLButtonElement
+  expect(other.disabled).toBe(false)
+})

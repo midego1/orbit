@@ -134,6 +134,11 @@ pub(crate) struct UndoRecord {
     pub created_at: i64,
     pub expires_at: i64,
     pub state: UndoState,
+    /// The task's version right after this change was undone (an update's undo; `None` for a create, whose task went
+    /// to the trash). An earlier change to the same task may be undone next, in this request or a later one, while
+    /// the task still has it.
+    #[serde(default)]
+    pub undone_version: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

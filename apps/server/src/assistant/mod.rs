@@ -672,6 +672,8 @@ pub(crate) async fn undo_for(
         .await
     {
         tracing::warn!(%error, "assistant conversation could not be saved after an undo");
+        // the conversation is not left held for the rest of the lease
+        let _ = state.store.release(&fresh, &lease).await;
     }
     let mut results = results;
     for result in &mut results {

@@ -33,7 +33,7 @@ import { assistantBase, assistantKeys, fetchAssistantStatus, startConversation, 
 import { Fields, PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
 import { BatchApprovalCard } from './BatchApprovalCard'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
-import { BATCH_TOOL, knownTasks, outcomeLine, readBatch, readBatchResult, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
+import { BATCH_TOOL, detailsOpen, knownTasks, outcomeLine, readBatch, readBatchResult, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { UndoContext, type UndoChanges } from './undoContext'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepOutcome, type StepView } from './toolSteps'
 
@@ -509,7 +509,7 @@ function Step(props: ToolCallMessagePartProps) {
       <BatchApprovalCard
         items={batch}
         names={names}
-        onDecide={(decision) => void submit([{ interruptId: interrupt.id, status: 'resolved', payload: decision }])}
+        onDecide={(decision) => submit([{ interruptId: interrupt.id, status: 'resolved', payload: decision }])}
       />
     )
   }
@@ -517,6 +517,7 @@ function Step(props: ToolCallMessagePartProps) {
     return (
       <ApprovalCard
         view={view}
+        openDetails={detailsOpen(toolName, args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : {}, readPreview(interrupt?.metadata?.preview) !== null)}
         preview={readPreview(interrupt?.metadata?.preview)}
         allowable={interrupt?.metadata?.allowForConversation === true && view.risk === 'write'}
         onDecide={(approved, forChat) => void respondToApproval(forChat ? { approved, reason: 'allow_for_conversation' } : { approved })}
@@ -566,7 +567,7 @@ function Step(props: ToolCallMessagePartProps) {
   )
 }
 
-function ApprovalCard({ view, preview, allowable, onDecide }: { view: StepView; preview: ApprovalPreview | null; allowable: boolean; onDecide: (approved: boolean, forChat?: boolean) => void }) {
+function ApprovalCard({ view, preview, openDetails, allowable, onDecide }: { view: StepView; preview: ApprovalPreview | null; openDetails: boolean; allowable: boolean; onDecide: (approved: boolean, forChat?: boolean) => void }) {
   // with a preview, the full arguments stay under Details
   const fields = preview ? [] : view.fields
   const details = preview ? [...view.fields, ...view.details] : view.details
@@ -583,7 +584,7 @@ function ApprovalCard({ view, preview, allowable, onDecide }: { view: StepView; 
         {preview ? <PreviewCard preview={preview} /> : null}
         {fields.length ? <Fields fields={fields} /> : null}
         {details.length ? (
-          <details className="text-xs">
+          <details className="text-xs" open={openDetails}>
             <summary className="cursor-pointer text-muted-foreground outline-none hover:text-foreground focus-visible:text-foreground">Details</summary>
             <Fields fields={details} className="mt-1" />
           </details>

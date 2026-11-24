@@ -434,6 +434,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         nonce: &str,
     ) -> CallResult {
         let mut stopped: Option<&str> = None;
+        // the same wall-clock limit as a run: a slow batch stops between changes
+        let deadline = Instant::now() + self.limits.run_time;
         let mut lines = vec![
             "Orbit ran the changes of this batch that the user approved, in order, and stops at the first failure:"
                 .to_owned(),
@@ -448,6 +450,9 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 Some(reason)
             } else if self.cancel.is_cancelled() {
                 stopped = Some("the user stopped the run");
+                stopped
+            } else if Instant::now() >= deadline {
+                stopped = Some("the time limit for one run was reached");
                 stopped
             } else {
                 None
@@ -802,7 +807,19 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
                 && let Some(input) = input
             {
                 match self.propose(state, &input).await {
+                    // each change of a batch counts toward the message's tool calls (the batch itself already did)
+                    Ok((items, _))
+                        if state.turn.tool_calls + (items.len() as u32).saturating_sub(1)
+                            > self.limits.max_tool_calls =>
+                    {
+                        CallResult::error(format!(
+                            "Not run: one message may make at most {} tool calls, and this batch's {} changes would pass that. Propose fewer changes, or answer the user with what you have.",
+                            self.limits.max_tool_calls,
+                            items.len()
+                        ))
+                    }
                     Ok((items, risk)) => {
+                        state.turn.tool_calls += (items.len() as u32).saturating_sub(1);
                         self.pause_batch(state, message_id, id, input, items, risk, queue, results)
                             .await;
                         return ToolsOutcome::Paused;
@@ -861,7 +878,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         results: Vec<Block>,
     ) {
         let expires_at = TimestampMillis::now().as_millis() + self.limits.approval_ttl_ms;
-        let interrupt_id = format!("approve:{id}");
+        // a server-made part as well: a model that repeats a tool_use id can never meet an older approval
+        let interrupt_id = format!("approve:{id}:{}", prompt::new_nonce());
         let mut metadata = json!({"tool": name, "risk": risk, "allowForConversation": risk == Risk::Write && !self.free_text(&name)});
         // what the change does, from the server's own reading of the item now (kept with the interrupt, so a reload
         // shows the same card)
@@ -980,7 +998,8 @@ impl<P: ModelProvider, T: ToolRunner, H: RunHooks> Engine<'_, P, T, H> {
         results: Vec<Block>,
     ) {
         let expires_at = TimestampMillis::now().as_millis() + self.limits.approval_ttl_ms;
-        let interrupt_id = format!("approve:{id}");
+        // a server-made part as well: a model that repeats a tool_use id can never meet an older approval
+        let interrupt_id = format!("approve:{id}:{}", prompt::new_nonce());
         let mut shown = Vec::new();
         for item in &mut items {
             let mut entry = json!({

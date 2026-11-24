@@ -198,12 +198,20 @@ function undoView(outcome: string, message: string): UndoView {
 export function SummaryCard({ card }: { card: SummaryCardData }) {
   const undo = useContext(UndoContext)
   const [views, setViews] = useState<Record<string, UndoView>>({})
-  const view = (change: Change): UndoView | null => (change.undo ? (views[change.undo.id] ?? { state: change.undo.state, message: '' }) : null)
+  const view = (change: Change): UndoView | null => {
+    if (!change.undo) return null
+    const local = views[change.undo.id]
+    if (local) return local
+    // an undo the server saw start but not finish (cut off): never "Undoing…" for good, and never undone twice
+    if (change.undo.state === 'undoing') return { state: 'conflict', message: 'An earlier undo of this change was cut off. Check the task before you try anything else.' }
+    return { state: change.undo.state, message: '' }
+  }
   const applied = card.changes.filter((change) => change.outcome === 'applied').length
   const failed = card.changes.filter((change) => change.outcome === 'failed').length
   const skipped = card.changes.filter((change) => change.outcome === 'skipped').length
   const undoable = card.changes.flatMap((change) => (change.undo && view(change)?.state === 'available' ? [change.undo.id] : []))
-  const busy = card.changes.some((change) => view(change)?.state === 'undoing')
+  // only the undos this panel started keep the buttons off while they run
+  const busy = Object.values(views).some((entry) => entry.state === 'undoing')
 
   async function run(ids: string[]) {
     if (!undo || ids.length === 0) return

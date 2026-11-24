@@ -268,11 +268,39 @@ export function readBatch(value: unknown): BatchItem[] | null {
     .map(record)
     .flatMap((entry) => {
       if (!entry || typeof entry.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(entry.id)) return []
-      if (typeof entry.tool !== 'string' || !/^[a-z_]{1,64}$/.test(entry.tool)) return []
+      if (typeof entry.tool !== 'string' || !/^[a-z0-9_]{1,64}$/.test(entry.tool)) return []
       const risk: StepRisk = entry.risk === 'dangerous' ? 'dangerous' : 'write'
       return [{ id: entry.id, tool: entry.tool, risk, args: record(entry.args) ?? {}, freeText: entry.freeText !== false, preview: readPreview(entry.preview) }]
     })
   return items.length ? items : null
+}
+
+/** Arguments a change's preview card shows in full; any other argument is only readable under Details. */
+const PREVIEW_SHOWS: Record<string, readonly string[]> = {
+  create_task: ['project_id', 'status_id', 'title', 'priority', 'assignee_ids', 'due_at'],
+  update_task: ['task_id', 'expected_version', 'status_id', 'title', 'priority', 'assignee_ids', 'due_at'],
+}
+
+/** Arguments whose text Orbit renders as Markdown or HTML elsewhere (`RICH_TEXT_ARGS` in registry.rs). */
+const RICH_TEXT_ARGS: readonly string[] = ['description', 'markdown', 'body', 'text', 'content', 'values', 'message', 'quote', 'config']
+
+function given(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return false
+  if (Array.isArray(value)) return value.length > 0
+  return typeof value !== 'object' || Object.keys(value as object).length > 0
+}
+
+/**
+ * Whether an approval card opens its Details at once: when the change carries rich text (a description, a comment), or
+ * when it has a preview that does not show every argument (a parent, a recurrence, …). Nothing the change writes may
+ * be approved unseen behind a fold.
+ */
+export function detailsOpen(tool: string, args: Record<string, unknown>, hasPreview: boolean): boolean {
+  if (Object.entries(args).some(([key, value]) => RICH_TEXT_ARGS.includes(key) && given(value))) return true
+  if (!hasPreview) return false
+  const shown = PREVIEW_SHOWS[tool] ?? []
+  // a cleared value (`null`, `[]` for labels) is a change too; only an empty text is nothing
+  return Object.entries(args).some(([key, value]) => value !== undefined && value !== '' && !shown.includes(key))
 }
 
 /** What happened to each change of an answered batch (the `propose_changes` step's result). */
