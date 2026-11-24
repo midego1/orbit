@@ -9,7 +9,12 @@
 
 use serde_json::{Value, json};
 
-use super::engine::ToolRunner;
+use std::time::Duration;
+
+use futures_util::future::join_all;
+use tokio_util::sync::CancellationToken;
+
+use super::engine::{Input, ToolRunner};
 use super::prompt;
 
 /// At most this many mentions per message; the panel sends no more either.
@@ -17,6 +22,8 @@ pub(crate) const MAX_MENTIONS: usize = 10;
 const MAX_TOKEN_CHARS: usize = 80;
 /// Member pages read to find the people named (100 per page).
 const MAX_MEMBER_PAGES: usize = 10;
+/// How long the reads of a message's mentions may take before the message goes without them.
+pub(crate) const RESOLVE_TIME: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kind {
@@ -108,7 +115,7 @@ pub(crate) fn requested(context: &[Value], text: &str) -> Vec<Requested> {
                 !token.is_empty()
                     && token.chars().count() <= MAX_TOKEN_CHARS
                     && !token.chars().any(char::is_control)
-                    && text.contains(&format!("@{token}"))
+                    && names(text, token)
             })
             .unwrap_or_default()
             .to_owned();
@@ -124,6 +131,18 @@ pub(crate) fn requested(context: &[Value], text: &str) -> Vec<Requested> {
     out
 }
 
+/// Whether the text holds "@token" as a whole mention (after the start or a space; before a space, the end or a
+/// punctuation mark), as the panel finds it: "@ENG-1" is not in "@ENG-12".
+fn names(text: &str, token: &str) -> bool {
+    let needle = format!("@{token}");
+    text.match_indices(&needle).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + needle.len()..].chars().next();
+        before.is_none_or(char::is_whitespace)
+            && after.is_none_or(|c| c.is_whitespace() || ".,!?;:)]}\"'".contains(c))
+    })
+}
+
 fn string(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -131,56 +150,61 @@ fn string(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Reads every mention again as the member (`tools` carry their access). One that fails (not
-/// found, not visible, a tool error) is left out.
+/// Reads every mention again as the member (`tools` carry their access), all at once: the server's own reads
+/// (`ToolRunner::lookup`), not steps of the conversation. One that fails (not found, not visible, a tool error) is
+/// left out.
 pub(crate) async fn resolve<T: ToolRunner>(tools: &T, requested: &[Requested]) -> Vec<Resolved> {
-    let mut projects: Option<Vec<Value>> = None;
-    let mut members: Option<Vec<Value>> = None;
-    let mut out = Vec::new();
-    for mention in requested {
-        let found = match mention.kind {
+    let wants = |kind: Kind| requested.iter().any(|mention| mention.kind == kind);
+    let projects = async {
+        if !wants(Kind::Project) {
+            return Vec::new();
+        }
+        tools
+            .lookup("list_projects", json!({}))
+            .await
+            .ok()
+            .and_then(|list| list["items"].as_array().cloned())
+            .unwrap_or_default()
+    };
+    let members = async {
+        if wants(Kind::Person) {
+            member_list(tools).await
+        } else {
+            Vec::new()
+        }
+    };
+    // tasks and docs one read each; projects and people from one list each
+    let singles = join_all(requested.iter().map(|mention| async move {
+        match mention.kind {
             Kind::Task => tools
-                .call("get_task", json!({"task_id": mention.id}))
+                .lookup("get_task", json!({"task_id": mention.id}))
                 .await
                 .ok()
                 // the id the member sent must be the task's own (an identifier would also resolve)
                 .filter(|task| task["id"] == mention.id.as_str())
                 .map(|task| (string(&task["identifier"]), string(&task["title"]))),
             Kind::Doc => tools
-                .call("get_doc", json!({"page_id": mention.id}))
+                .lookup("get_doc", json!({"page_id": mention.id}))
                 .await
                 .ok()
                 .filter(|doc| doc["id"] == mention.id.as_str())
                 .map(|doc| (None, string(&doc["title"]))),
-            Kind::Project => {
-                if projects.is_none() {
-                    projects = Some(
-                        tools
-                            .call("list_projects", json!({}))
-                            .await
-                            .ok()
-                            .and_then(|list| list["items"].as_array().cloned())
-                            .unwrap_or_default(),
-                    );
-                }
-                projects
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .find(|project| project["id"] == mention.id.as_str())
-                    .map(|project| (string(&project["key"]), string(&project["name"])))
-            }
-            Kind::Person => {
-                if members.is_none() {
-                    members = Some(member_list(tools).await);
-                }
-                members
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .find(|member| member["user_id"] == mention.id.as_str())
-                    .map(|member| (None, string(&member["display_name"])))
-            }
+            Kind::Project | Kind::Person => None,
+        }
+    }));
+    let (projects, members, singles) = futures_util::join!(projects, members, singles);
+    let mut out = Vec::new();
+    for (mention, single) in requested.iter().zip(singles) {
+        let found = match mention.kind {
+            Kind::Task | Kind::Doc => single,
+            Kind::Project => projects
+                .iter()
+                .find(|project| project["id"] == mention.id.as_str())
+                .map(|project| (string(&project["key"]), string(&project["name"]))),
+            Kind::Person => members
+                .iter()
+                .find(|member| member["user_id"] == mention.id.as_str())
+                .map(|member| (None, string(&member["display_name"]))),
         };
         if let Some((key, name)) = found {
             out.push(Resolved {
@@ -195,6 +219,31 @@ pub(crate) async fn resolve<T: ToolRunner>(tools: &T, requested: &[Requested]) -
     out
 }
 
+/// Fills in a new message's mentions from the run's context: read again as the member, before the run starts. Stop
+/// (or a closed tab) ends the reads at once, and after [`RESOLVE_TIME`] the message goes without them.
+pub(crate) async fn attach<T: ToolRunner>(
+    request: &mut Input,
+    context: &[Value],
+    tools: &T,
+    cancel: &CancellationToken,
+) {
+    let Input::Message { text, mentions, .. } = request else {
+        return;
+    };
+    let wanted = requested(context, text);
+    if wanted.is_empty() {
+        return;
+    }
+    // a stop wins over reads that are done at the same moment
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {}
+        resolved = tokio::time::timeout(RESOLVE_TIME, resolve(tools, &wanted)) => {
+            *mentions = resolved.unwrap_or_default();
+        }
+    }
+}
+
 async fn member_list<T: ToolRunner>(tools: &T) -> Vec<Value> {
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
@@ -203,7 +252,7 @@ async fn member_list<T: ToolRunner>(tools: &T) -> Vec<Value> {
         if let Some(cursor) = &cursor {
             input["cursor"] = json!(cursor);
         }
-        let Ok(page) = tools.call("list_members", input).await else {
+        let Ok(page) = tools.lookup("list_members", input).await else {
             break;
         };
         all.extend(page["items"].as_array().cloned().unwrap_or_default());
@@ -215,6 +264,10 @@ async fn member_list<T: ToolRunner>(tools: &T) -> Vec<Value> {
     all
 }
 
+fn quoted(text: &str) -> String {
+    Value::String(text.to_owned()).to_string()
+}
+
 /// What the model reads before the message: one line per mention, as untrusted data.
 pub(crate) fn model_text(nonce: &str, mentions: &[Resolved]) -> Option<String> {
     if mentions.is_empty() {
@@ -223,13 +276,17 @@ pub(crate) fn model_text(nonce: &str, mentions: &[Resolved]) -> Option<String> {
     let lines: Vec<String> = mentions
         .iter()
         .map(|mention| {
-            // names as JSON strings: quotes and line breaks stay inside them
-            let name = Value::String(mention.name.clone()).to_string();
+            // names and keys as JSON strings: quotes and line breaks stay inside them
+            let name = quoted(&mention.name);
             match (mention.kind, &mention.key) {
-                (Kind::Task, Some(key)) => format!("- task {key} {name} (task id {})", mention.id),
-                (Kind::Project, Some(key)) => {
-                    format!("- project {name}, key {key} (project id {})", mention.id)
+                (Kind::Task, Some(key)) => {
+                    format!("- task {} {name} (task id {})", quoted(key), mention.id)
                 }
+                (Kind::Project, Some(key)) => format!(
+                    "- project {name}, key {} (project id {})",
+                    quoted(key),
+                    mention.id
+                ),
                 (Kind::Person, _) => format!("- person {name} (user id {})", mention.id),
                 (kind, _) => format!(
                     "- {} {name} ({} id {})",
@@ -301,6 +358,16 @@ mod tests {
                 },
             ]
         );
+        // a shorter label inside a longer mention gets no chip text
+        assert_eq!(
+            requested(
+                &context(json!([{"kind": "task", "id": "t1", "token": "ENG-1"}])),
+                "see @ENG-12"
+            )[0]
+            .token,
+            ""
+        );
+        assert!(names("see @ENG-1.", "ENG-1") && !names("x@ENG-1", "ENG-1"));
         assert!(requested(&[], "x").is_empty());
         assert!(requested(&context(json!({"kind": "task"})), "x").is_empty());
         assert!(
@@ -342,7 +409,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            text.contains("- task ENG-1 \"Fix \\\"login\\\"\\n"),
+            text.contains("- task \"ENG-1\" \"Fix \\\"login\\\"\\n"),
             "{text}"
         );
         assert!(text.contains("- doc \"Roadmap\" (doc id d1)"), "{text}");

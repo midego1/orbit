@@ -812,10 +812,7 @@ async fn run(
             }
         });
     }
-    let wanted = match &request {
-        Input::Message { text, .. } => mentions::requested(&input.context, text),
-        Input::Resume { .. } => Vec::new(),
-    };
+    let context = input.context.clone();
     // an admin took the chat's model off the list: the chat goes back to the workspace's model, and says so once
     let mut emitter = Emitter::new(sender);
     if let Some(dropped) = dropped
@@ -838,12 +835,7 @@ async fn run(
         };
         // the member's mentions, read again with their own access (before the run, outside any transaction)
         let mut request = request;
-        if let Input::Message {
-            mentions: resolved, ..
-        } = &mut request
-        {
-            *resolved = mentions::resolve(&tools, &wanted).await;
-        }
+        mentions::attach(&mut request, &context, &tools, &cancel).await;
         let hooks = DbHooks {
             state: state.clone(),
             conversation: conversation.clone(),
