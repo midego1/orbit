@@ -15,6 +15,18 @@ questions about your tasks, docs and chats and makes changes for you, through th
 as the signed-in member. Every change waits for your approval, and with **Follow along** on the page goes to what it
 changed. It runs on Anthropic's Claude models with **your own Anthropic API key**.
 
+**What it looks like.** Answers come as cards built by the server from the tool's own result, never from the model's
+text: exact task counts and grouped lists, task keys that link to the task, and a before → after card for every change
+that waits for your approval. While it works, a light travels around the window edge (blue for reading, amber for
+changing, steady violet while it waits for you); with reduced motion nothing moves.
+
+| Task list with exact counts | Approval: before → after | Summary of applied changes |
+| --- | --- | --- |
+| ![Task list card](docs/assets/ask-ai/task-list.png) | ![Approval card](docs/assets/ask-ai/approval.png) | ![Summary card](docs/assets/ask-ai/summary.png) |
+
+Dark mode has the same cards: [approval card](docs/assets/ask-ai/approval-dark.png). The screenshots show demo data.
+Details: [docs/assistant.md](docs/assistant.md).
+
 **Run it.** Build and start it like upstream Orbit, from this branch:
 
 - Docker: `docker build -t orbit-ask-ai .`, then run it as in [Self-hosting with Docker](#self-hosting-with-docker)
