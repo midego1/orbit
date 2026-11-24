@@ -1032,6 +1032,40 @@ pub(crate) fn client_view(value: &Value) -> String {
     Value::Object(compact).to_string()
 }
 
+/// Closes a conversation the member switches away from (New chat, or continuing another one): the
+/// approval that waits expires for good (its call and the calls queued after it are answered as not
+/// done, so the transcript stays valid and the panel shows "Expired"), and every "Allow in this
+/// chat" is withdrawn, so continuing the conversation later asks again for each change. `true` when
+/// the state changed.
+pub(crate) fn retire(state: &mut ConversationState) -> bool {
+    let mut changed = !state.allowed_tools.is_empty();
+    state.allowed_tools.clear();
+    if let Some(pending) = state.pending.take() {
+        changed = true;
+        let mut content = pending.results;
+        content.push(Block::ToolResult {
+            tool_use_id: pending.tool_use_id.clone(),
+            content: EXPIRED.into(),
+            is_error: false,
+        });
+        for block in pending.queue {
+            if let Block::ToolUse { id, .. } = block {
+                content.push(Block::ToolResult {
+                    tool_use_id: id,
+                    content: NOT_RUN.into(),
+                    is_error: false,
+                });
+            }
+        }
+        state.transcript.push(Message::user(content));
+        state.display.push(agui::tool_message(
+            &pending.tool_use_id,
+            &json!({"expired": true}).to_string(),
+        ));
+    }
+    changed
+}
+
 /// Every `tool_use` of the last assistant message gets a result, so a stopped run never leaves
 /// the transcript in a shape the provider refuses.
 pub(crate) fn repair(transcript: &mut Vec<Message>, applying: Option<&str>) {

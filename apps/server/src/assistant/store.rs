@@ -1,20 +1,33 @@
-//! Ask AI conversations, kept server-side for a few hours: one current conversation per user and
-//! workspace, its transcript (what the model sees), its AG-UI messages (what a reload shows), the
+//! Ask AI conversations, kept server-side for their member only: one active conversation per user
+//! and workspace (the one the panel shows) and the archived ones of the history. Each holds its
+//! transcript (what the model sees), its AG-UI messages (what a reload or the history shows), the
 //! approval waiting for the user (with the exact arguments, which are never taken back from the
-//! client) and the tools the user allowed for the conversation. A lease makes sure a
-//! conversation has one run at a time, over every server of the database.
+//! client) and the tools the user allowed for the conversation. A lease makes sure a conversation
+//! has one run at a time, over every server of the database. Only the active conversation runs:
+//! switching away retires its waiting approval (`engine::retire`), so an old approval can never be
+//! applied later.
 
 use std::collections::BTreeSet;
 
-use orbit_platform::{Database, Id, Row, TimestampMillis};
+use orbit_platform::{Database, Id, Row, SqlBuilder, TimestampMillis};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::engine;
 use super::model::{Block, Message};
 use super::registry::Risk;
 
-/// How long a conversation lives after its last activity.
-pub(crate) const CONVERSATION_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// How long a conversation is kept after its last use (the history's retention).
+pub(crate) const CONVERSATION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// The panel opens the active conversation only while it was used within this time; after that a
+/// new chat starts and the old one stays in the history.
+pub(crate) const IDLE_MS: i64 = 6 * 60 * 60 * 1000;
+/// The most conversations kept per member and workspace; a new chat prunes the oldest.
+pub(crate) const MAX_CONVERSATIONS: i64 = 100;
+/// A derived title is the first message cut to this many characters.
+pub(crate) const TITLE_CHARS: usize = 80;
+/// The longest title a member may give a conversation.
+pub(crate) const MAX_TITLE_CHARS: usize = 120;
 /// A conversation whose state grows past this takes no new messages ("start a new chat").
 pub(crate) const MAX_STATE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -91,6 +104,12 @@ pub(crate) struct Conversation {
     pub expires_at: i64,
     /// A run holds the conversation until this time.
     pub busy_until: Option<i64>,
+    pub title: Option<String>,
+    pub message_count: i64,
+    /// The member's current conversation in the workspace (the others are history).
+    pub active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Clone)]
@@ -98,32 +117,141 @@ pub(crate) struct ConversationStore {
     database: Database,
 }
 
+/// A conversation as the history lists it (no transcript).
+#[derive(Clone, Debug)]
+pub(crate) struct Summary {
+    pub id: Id,
+    pub title: Option<String>,
+    pub message_count: i64,
+    pub active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// What switching to a conversation (a new one, or one of the history) did.
+#[derive(Debug)]
+pub(crate) enum Switch {
+    Done(Box<Conversation>),
+    /// A run holds one of the member's conversations: stop it first.
+    Busy,
+    /// No such conversation for this member (or it expired).
+    NotFound,
+}
+
+/// What a delete did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Deleted {
+    Deleted,
+    Busy,
+    NotFound,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    New,
+    Existing(Id),
+}
+
+/// The title a conversation gets from its first message: line breaks and tabs become spaces, the
+/// text is trimmed and cut at `TITLE_CHARS` (the migration that made the history uses the same rule).
+pub(crate) fn derive_title(text: &str) -> Option<String> {
+    let flat: String = text
+        .chars()
+        .map(|c| {
+            if matches!(c, '\r' | '\n' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let flat = flat.trim_matches(' ');
+    if flat.is_empty() {
+        return None;
+    }
+    if flat.chars().count() <= TITLE_CHARS {
+        return Some(flat.to_owned());
+    }
+    let cut: String = flat.chars().take(TITLE_CHARS - 1).collect();
+    Some(format!("{}…", cut.trim_end_matches(' ')))
+}
+
+/// A title the member typed: whitespace runs become one space; empty, too long or with control
+/// characters is refused.
+pub(crate) fn clean_title(text: &str) -> Option<String> {
+    if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+        return None;
+    }
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty() && title.chars().count() <= MAX_TITLE_CHARS).then_some(title)
+}
+
+/// The title of a conversation's first user message, as the panel shows it.
+fn first_message_title(state: &ConversationState) -> Option<String> {
+    state
+        .display
+        .iter()
+        .find(|message| message["role"] == "user")
+        .and_then(|message| message["content"].as_str())
+        .and_then(derive_title)
+}
+
+/// The user and assistant messages the panel shows.
+fn message_count(state: &ConversationState) -> i64 {
+    let count = state
+        .display
+        .iter()
+        .filter(|message| message["role"] == "user" || message["role"] == "assistant")
+        .count();
+    i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+fn parse_id(row: &sqlx::any::AnyRow, column: &str) -> Result<Id, sqlx::Error> {
+    row.try_get::<String, _>(column)?
+        .parse()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
 fn from_row(row: &sqlx::any::AnyRow) -> Result<Conversation, sqlx::Error> {
-    let parse = |column: &str| -> Result<Id, sqlx::Error> {
-        row.try_get::<String, _>(column)?
-            .parse()
-            .map_err(|error| sqlx::Error::Decode(Box::new(error)))
-    };
     let state: String = row.try_get("state_json")?;
     Ok(Conversation {
-        id: parse("id")?,
-        workspace_id: parse("workspace_id")?,
-        user_id: parse("user_id")?,
+        id: parse_id(row, "id")?,
+        workspace_id: parse_id(row, "workspace_id")?,
+        user_id: parse_id(row, "user_id")?,
         state: serde_json::from_str(&state)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
         expires_at: row.try_get("expires_at")?,
         busy_until: row.try_get("run_until")?,
+        title: row.try_get("title")?,
+        message_count: row.try_get("message_count")?,
+        active: row.try_get::<i64, _>("active")? == 1,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
-const COLUMNS: &str = "id, workspace_id, user_id, state_json, expires_at, run_until";
+fn summary_from_row(row: &sqlx::any::AnyRow) -> Result<Summary, sqlx::Error> {
+    Ok(Summary {
+        id: parse_id(row, "id")?,
+        title: row.try_get("title")?,
+        message_count: row.try_get("message_count")?,
+        active: row.try_get::<i64, _>("active")? == 1,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+const COLUMNS: &str = "id, workspace_id, user_id, state_json, expires_at, run_until, title, message_count, active, \
+     created_at, updated_at";
+const SUMMARY_COLUMNS: &str = "id, title, message_count, active, created_at, updated_at";
 
 impl ConversationStore {
     pub(crate) const fn new(database: Database) -> Self {
         Self { database }
     }
 
-    /// The user's current conversation in the workspace, if one is still alive.
+    /// The conversation the panel opens: the user's active one in the workspace, while it was used
+    /// within `IDLE_MS` (after that the panel starts a new chat; the old one stays in the history).
     pub(crate) async fn current(
         &self,
         workspace_id: Id,
@@ -132,11 +260,12 @@ impl ConversationStore {
     ) -> Result<Option<Conversation>, sqlx::Error> {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
-             AND expires_at > $3 ORDER BY updated_at DESC, id DESC LIMIT 1"
+             AND active = 1 AND expires_at > $3 AND updated_at > $4"
         )))
         .bind(workspace_id.to_string())
         .bind(user_id.to_string())
         .bind(now.as_millis())
+        .bind(now.as_millis() - IDLE_MS)
         .fetch_optional(self.database.pool())
         .await?
         .as_ref()
@@ -144,7 +273,7 @@ impl ConversationStore {
         .transpose()
     }
 
-    /// The conversation, only for its own user and workspace, while it lives.
+    /// The conversation, only for its own user and workspace, while it is kept (active or not).
     pub(crate) async fn get(
         &self,
         id: Id,
@@ -167,8 +296,66 @@ impl ConversationStore {
         .transpose()
     }
 
-    /// Starts a new conversation and drops the user's earlier ones in this workspace (and any
-    /// conversation of the workspace that expired). Refused while a run holds the current one.
+    /// The conversation only while it is the user's active one: the only one a run may use.
+    pub(crate) async fn get_active(
+        &self,
+        id: Id,
+        workspace_id: Id,
+        user_id: Id,
+        now: TimestampMillis,
+    ) -> Result<Option<Conversation>, sqlx::Error> {
+        Ok(self
+            .get(id, workspace_id, user_id, now)
+            .await?
+            .filter(|conversation| conversation.active))
+    }
+
+    /// The user's own conversations in the workspace that have messages, newest use first, after
+    /// the `before` cursor (`updated_at`, `id` of the last row of the previous page). Asks for one
+    /// more than `limit`, so the caller knows whether another page follows.
+    pub(crate) async fn list(
+        &self,
+        workspace_id: Id,
+        user_id: Id,
+        before: Option<(i64, Id)>,
+        limit: i64,
+        now: TimestampMillis,
+    ) -> Result<Vec<Summary>, sqlx::Error> {
+        let mut query = SqlBuilder::new(format!(
+            "SELECT {SUMMARY_COLUMNS} FROM assistant_conversations WHERE workspace_id = "
+        ));
+        query
+            .push_bind(workspace_id.to_string())
+            .push(" AND user_id = ")
+            .push_bind(user_id.to_string())
+            .push(" AND message_count > 0 AND expires_at > ")
+            .push_bind(now.as_millis());
+        if let Some((updated_at, id)) = before {
+            query
+                .push(" AND (updated_at < ")
+                .push_bind(updated_at)
+                .push(" OR (updated_at = ")
+                .push_bind(updated_at)
+                .push(" AND id < ")
+                .push_bind(id.to_string())
+                .push("))");
+        }
+        query
+            .push(" ORDER BY updated_at DESC, id DESC LIMIT ")
+            .push_bind(limit + 1);
+        query
+            .build()
+            .fetch_all(self.database.pool())
+            .await?
+            .iter()
+            .map(summary_from_row)
+            .collect()
+    }
+
+    /// Starts a new conversation. The user's active one is archived (deleted when it has no
+    /// messages), its waiting approval expires; expired conversations of the workspace go, and the
+    /// user's oldest ones beyond `MAX_CONVERSATIONS`. `None` while a run holds one of the user's
+    /// conversations.
     pub(crate) async fn create(
         &self,
         workspace_id: Id,
@@ -176,6 +363,163 @@ impl ConversationStore {
         nonce: String,
         now: TimestampMillis,
     ) -> Result<Option<Conversation>, sqlx::Error> {
+        Ok(
+            match self
+                .switch(workspace_id, user_id, Target::New, nonce, now)
+                .await?
+            {
+                Switch::Done(conversation) => Some(*conversation),
+                Switch::Busy | Switch::NotFound => None,
+            },
+        )
+    }
+
+    /// Makes one of the user's earlier conversations the active one again (it moves to the top of
+    /// the history). The conversation that was active is archived as by `create`.
+    pub(crate) async fn resume(
+        &self,
+        id: Id,
+        workspace_id: Id,
+        user_id: Id,
+        now: TimestampMillis,
+    ) -> Result<Switch, sqlx::Error> {
+        self.switch(
+            workspace_id,
+            user_id,
+            Target::Existing(id),
+            String::new(),
+            now,
+        )
+        .await
+    }
+
+    async fn switch(
+        &self,
+        workspace_id: Id,
+        user_id: Id,
+        target: Target,
+        nonce: String,
+        now: TimestampMillis,
+    ) -> Result<Switch, sqlx::Error> {
+        // A run may save the active conversation between the read and the transaction: then the
+        // version check fails and the switch starts over.
+        for _ in 0..3 {
+            let active: Option<Conversation> = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {COLUMNS} FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
+                 AND active = 1"
+            )))
+            .bind(workspace_id.to_string())
+            .bind(user_id.to_string())
+            .fetch_optional(self.database.pool())
+            .await?
+            .as_ref()
+            .map(from_row)
+            .transpose()?;
+            // the retired state is worked out before the write transaction (it can be large)
+            let retiring = match active {
+                Some(conversation) if target != Target::Existing(conversation.id) => {
+                    let mut state = conversation.state.clone();
+                    let json = if engine::retire(&mut state) {
+                        Some(
+                            serde_json::to_string(&state)
+                                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?,
+                        )
+                    } else {
+                        None
+                    };
+                    Some((conversation, json))
+                }
+                _ => None,
+            };
+            let mut transaction = self.database.workspace_transaction(workspace_id).await?;
+            let busy: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT run_until FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
+                 AND run_until IS NOT NULL AND run_until > $3 LIMIT 1",
+            )
+            .bind(workspace_id.to_string())
+            .bind(user_id.to_string())
+            .bind(now.as_millis())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .flatten();
+            if busy.is_some() {
+                return Ok(Switch::Busy);
+            }
+            if let Some((conversation, json)) = &retiring {
+                let archived = if conversation.message_count == 0 {
+                    sqlx::query(
+                        "DELETE FROM assistant_conversations WHERE id = $1 AND active = 1 AND updated_at = $2",
+                    )
+                    .bind(conversation.id.to_string())
+                    .bind(conversation.updated_at)
+                    .execute(&mut *transaction)
+                    .await?
+                } else {
+                    sqlx::query(
+                        "UPDATE assistant_conversations SET active = 0, state_json = COALESCE($1, state_json) \
+                         WHERE id = $2 AND active = 1 AND updated_at = $3",
+                    )
+                    .bind(json.clone())
+                    .bind(conversation.id.to_string())
+                    .bind(conversation.updated_at)
+                    .execute(&mut *transaction)
+                    .await?
+                }
+                .rows_affected();
+                if archived != 1 {
+                    // changed since it was read: roll back and read again
+                    drop(transaction);
+                    continue;
+                }
+            }
+            let conversation = match target {
+                Target::New => {
+                    let conversation = self
+                        .insert(&mut transaction, workspace_id, user_id, nonce.clone(), now)
+                        .await?;
+                    transaction.commit().await?;
+                    conversation
+                }
+                Target::Existing(id) => {
+                    let resumed = sqlx::query(
+                        "UPDATE assistant_conversations SET active = 1, updated_at = $1, expires_at = $2 \
+                         WHERE id = $3 AND workspace_id = $4 AND user_id = $5 AND expires_at > $1",
+                    )
+                    .bind(now.as_millis())
+                    .bind(now.as_millis() + CONVERSATION_TTL_MS)
+                    .bind(id.to_string())
+                    .bind(workspace_id.to_string())
+                    .bind(user_id.to_string())
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected();
+                    if resumed != 1 {
+                        // nothing was archived either
+                        return Ok(Switch::NotFound);
+                    }
+                    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SELECT {COLUMNS} FROM assistant_conversations WHERE id = $1"
+                    )))
+                    .bind(id.to_string())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    transaction.commit().await?;
+                    from_row(&row)?
+                }
+            };
+            return Ok(Switch::Done(Box::new(conversation)));
+        }
+        Ok(Switch::Busy)
+    }
+
+    async fn insert(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+        workspace_id: Id,
+        user_id: Id,
+        nonce: String,
+        now: TimestampMillis,
+    ) -> Result<Conversation, sqlx::Error> {
         let id = Id::new_v7();
         let state = ConversationState {
             nonce,
@@ -184,31 +528,16 @@ impl ConversationStore {
         let json =
             serde_json::to_string(&state).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
         let expires_at = now.as_millis() + CONVERSATION_TTL_MS;
-        let mut transaction = self.database.workspace_transaction(workspace_id).await?;
-        let busy: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT run_until FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
-             AND run_until IS NOT NULL AND run_until > $3 LIMIT 1",
-        )
-        .bind(workspace_id.to_string())
-        .bind(user_id.to_string())
-        .bind(now.as_millis())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .flatten();
-        if busy.is_some() {
-            return Ok(None);
-        }
         sqlx::query(
-            "DELETE FROM assistant_conversations WHERE workspace_id = $1 AND (user_id = $2 OR expires_at <= $3)",
+            "DELETE FROM assistant_conversations WHERE workspace_id = $1 AND expires_at <= $2",
         )
         .bind(workspace_id.to_string())
-        .bind(user_id.to_string())
         .bind(now.as_millis())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO assistant_conversations (id, workspace_id, user_id, state_json, created_at, updated_at, \
-             expires_at) VALUES ($1, $2, $3, $4, $5, $5, $6)",
+             expires_at, message_count, active) VALUES ($1, $2, $3, $4, $5, $5, $6, 0, 1)",
         )
         .bind(id.to_string())
         .bind(workspace_id.to_string())
@@ -216,20 +545,104 @@ impl ConversationStore {
         .bind(json)
         .bind(now.as_millis())
         .bind(expires_at)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        transaction.commit().await?;
-        Ok(Some(Conversation {
+        // the cap: the newest `MAX_CONVERSATIONS` stay (the new one among them)
+        sqlx::query(
+            "DELETE FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 AND active = 0 \
+             AND id NOT IN (SELECT id FROM assistant_conversations WHERE workspace_id = $1 AND user_id = $2 \
+             ORDER BY updated_at DESC, id DESC LIMIT $3)",
+        )
+        .bind(workspace_id.to_string())
+        .bind(user_id.to_string())
+        .bind(MAX_CONVERSATIONS)
+        .execute(&mut **transaction)
+        .await?;
+        Ok(Conversation {
             id,
             workspace_id,
             user_id,
             state,
             expires_at,
             busy_until: None,
-        }))
+            title: None,
+            message_count: 0,
+            active: true,
+            created_at: now.as_millis(),
+            updated_at: now.as_millis(),
+        })
     }
 
-    /// Takes the conversation for one run until `until`; `false` when another run holds it.
+    /// Gives one of the user's conversations a title of their own. `None` when there is no such
+    /// conversation for them.
+    pub(crate) async fn rename(
+        &self,
+        id: Id,
+        workspace_id: Id,
+        user_id: Id,
+        title: &str,
+        now: TimestampMillis,
+    ) -> Result<Option<Summary>, sqlx::Error> {
+        let mut transaction = self.database.workspace_transaction(workspace_id).await?;
+        let renamed = sqlx::query(
+            "UPDATE assistant_conversations SET title = $1 WHERE id = $2 AND workspace_id = $3 AND user_id = $4 \
+             AND expires_at > $5",
+        )
+        .bind(title)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(user_id.to_string())
+        .bind(now.as_millis())
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if renamed != 1 {
+            return Ok(None);
+        }
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {SUMMARY_COLUMNS} FROM assistant_conversations WHERE id = $1"
+        )))
+        .bind(id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        summary_from_row(&row).map(Some)
+    }
+
+    /// Deletes one of the user's conversations for good (the active one too), unless a run holds it.
+    pub(crate) async fn delete(
+        &self,
+        id: Id,
+        workspace_id: Id,
+        user_id: Id,
+        now: TimestampMillis,
+    ) -> Result<Deleted, sqlx::Error> {
+        let mut transaction = self.database.workspace_transaction(workspace_id).await?;
+        let found: Option<Option<i64>> = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT run_until FROM assistant_conversations WHERE id = $1 AND workspace_id = $2 AND user_id = $3 \
+             AND expires_at > $4",
+        )
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(user_id.to_string())
+        .bind(now.as_millis())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        match found {
+            None => return Ok(Deleted::NotFound),
+            Some(Some(until)) if until > now.as_millis() => return Ok(Deleted::Busy),
+            Some(_) => {}
+        }
+        sqlx::query("DELETE FROM assistant_conversations WHERE id = $1")
+            .bind(id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Deleted::Deleted)
+    }
+
+    /// Takes the conversation for one run until `until`; `false` when another run holds it or it is
+    /// no longer the user's active conversation.
     pub(crate) async fn lease(
         &self,
         conversation: &Conversation,
@@ -242,7 +655,7 @@ impl ConversationStore {
             .workspace_transaction(conversation.workspace_id)
             .await?;
         let taken = sqlx::query(
-            "UPDATE assistant_conversations SET run_id = $1, run_until = $2 WHERE id = $3 \
+            "UPDATE assistant_conversations SET run_id = $1, run_until = $2 WHERE id = $3 AND active = 1 \
              AND (run_until IS NULL OR run_until <= $4)",
         )
         .bind(run_id)
@@ -256,8 +669,9 @@ impl ConversationStore {
         Ok(taken == 1)
     }
 
-    /// Saves the state (it slides the expiry); with `release`, also ends the run's lease. `false` when this run no
-    /// longer holds the conversation, so nothing was saved.
+    /// Saves the state (it slides the expiry, sets the title from the first message unless there is
+    /// one, and the message count); with `release`, also ends the run's lease. `false` when this run
+    /// no longer holds the conversation, so nothing was saved.
     pub(crate) async fn save(
         &self,
         conversation: &Conversation,
@@ -268,6 +682,7 @@ impl ConversationStore {
     ) -> Result<bool, sqlx::Error> {
         let json =
             serde_json::to_string(state).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        let title = first_message_title(state);
         let mut transaction = self
             .database
             .workspace_transaction(conversation.workspace_id)
@@ -275,7 +690,8 @@ impl ConversationStore {
         let saved = sqlx::query(
             "UPDATE assistant_conversations SET state_json = $1, updated_at = $2, expires_at = $3, \
              run_id = CASE WHEN CAST($4 AS BIGINT) = 1 THEN NULL ELSE run_id END, \
-             run_until = CASE WHEN CAST($4 AS BIGINT) = 1 THEN NULL ELSE run_until END \
+             run_until = CASE WHEN CAST($4 AS BIGINT) = 1 THEN NULL ELSE run_until END, \
+             title = COALESCE(title, $7), message_count = $8 \
              WHERE id = $5 AND run_id = $6",
         )
         .bind(json)
@@ -284,6 +700,8 @@ impl ConversationStore {
         .bind(i64::from(release))
         .bind(conversation.id.to_string())
         .bind(run_id)
+        .bind(title)
+        .bind(message_count(state))
         .execute(&mut *transaction)
         .await?
         .rows_affected();
