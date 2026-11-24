@@ -19,6 +19,7 @@ pub(crate) mod agui;
 pub(crate) mod anthropic;
 pub(crate) mod cards;
 pub(crate) mod engine;
+pub(crate) mod mentions;
 pub(crate) mod model;
 pub(crate) mod prompt;
 pub(crate) mod registry;
@@ -512,7 +513,11 @@ fn parse_input(input: &RunInput) -> Result<Input, &'static str> {
         .find(|entry| entry["description"] == "page")
         .and_then(|entry| entry["value"].as_str())
         .map(str::to_owned);
-    Ok(Input::Message { text, page })
+    Ok(Input::Message {
+        text,
+        page,
+        mentions: Vec::new(),
+    })
 }
 
 /// An SSE response that only carries a short message (no run happens).
@@ -731,6 +736,10 @@ async fn run(
             }
         });
     }
+    let wanted = match &request {
+        Input::Message { text, .. } => mentions::requested(&input.context, text),
+        Input::Resume { .. } => Vec::new(),
+    };
     let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, api_key);
     tokio::spawn(async move {
         let emitter = Emitter::new(sender);
@@ -738,6 +747,14 @@ async fn run(
             tools: state.tools.clone(),
             principal,
         };
+        // the member's mentions, read again with their own access (before the run, outside any transaction)
+        let mut request = request;
+        if let Input::Message {
+            mentions: resolved, ..
+        } = &mut request
+        {
+            *resolved = mentions::resolve(&tools, &wanted).await;
+        }
         let hooks = DbHooks {
             state: state.clone(),
             conversation: conversation.clone(),
