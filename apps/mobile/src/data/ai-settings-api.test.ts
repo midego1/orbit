@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatCost, keyLine, parseTokenCap } from './ai-settings-api'
+import { chatModelsToSave, formatCost, keyLine, parseTokenCap } from './ai-settings-api'
 
 describe('Ask AI settings', () => {
   test('the key line never shows more than the last four characters', () => {
@@ -21,5 +21,10 @@ describe('Ask AI settings', () => {
     expect(formatCost(0)).toBe('$0.00')
     expect(formatCost(0.004)).toBe('< $0.01')
     expect(formatCost(1.234)).toBe('$1.23')
+  })
+
+  test('the chat models to save leave out the workspace model and repeats', () => {
+    expect(chatModelsToSave(['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5-5'], 'claude-sonnet-5-5')).toEqual(['claude-opus-5-5'])
+    expect(chatModelsToSave(['claude-opus-5-5'], 'claude-opus-5-5')).toEqual([])
   })
 })

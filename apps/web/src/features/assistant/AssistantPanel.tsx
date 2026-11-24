@@ -23,6 +23,7 @@ import { cn } from 'cn'
 import { InfoTip } from '@/components/common/InfoTip'
 import { Tip } from '@/components/common/Tip'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { toast } from 'sonner'
 import { Spinner } from '@/components/ui/spinner'
 import { renderMarkdownBlocks } from '@/lib/markdown'
 import { MarkdownTextContext } from '@/lib/markdownTextContext'
@@ -32,7 +33,7 @@ import { assistantUi, useAssistantUi } from './assistantStore'
 import { useFollowGuard } from './followGuard'
 import { deriveRun, IDLE_RUN } from './assistantRunState'
 import { AssistantStatusLine } from './AssistantRunIndicators'
-import { assistantBase, assistantKeys, continueConversation, fetchAssistantStatus, openConversation, startConversation, stopConversation, undoChanges, type AssistantConversation, type AssistantStatus, type ConversationSummary } from './api'
+import { assistantBase, assistantKeys, continueConversation, fetchAssistantStatus, modelName, openConversation, setChatModel, startConversation, stopConversation, undoChanges, type AssistantConversation, type AssistantStatus, type ConversationSummary } from './api'
 import { AssistantHistory } from './AssistantHistory'
 import { chatTitle } from './history'
 import { Fields, PreviewCard, ResultCard, SummaryCard } from './AssistantCards'
@@ -40,7 +41,8 @@ import { BatchApprovalCard } from './BatchApprovalCard'
 import { TaskChipContext, taskChipRun } from './taskChipRun'
 import { BATCH_TOOL, detailsOpen, knownTasks, outcomeLine, readBatch, readBatchResult, readCard, resultsKey, readPreview, SUMMARY_TOOL, type ApprovalPreview } from './cards'
 import { UndoContext, type UndoChanges } from './undoContext'
-import { AssistantComposer, MentionChip } from './AssistantComposer'
+import { AssistantComposer, MentionChip, type ChatModels } from './AssistantComposer'
+import { ChatModelPicker } from './ChatModelPicker'
 import { mentionSegments, readMentions, serializeMentions, suggestionsFor, type Mention } from './composer'
 import { useAskDraft } from './useAskDraft'
 import { appPath, describeStep, notOpened, pageTargets, parseToolResult, resultLine, stepOutcome, type StepOutcome, type StepView } from './toolSteps'
@@ -159,6 +161,27 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
     setSwitchError(null)
     setView({ kind: 'chat' })
   }
+  // the chat's model, as the server stored it (a pick it refuses changes nothing)
+  function setModel(model: string) {
+    client.setQueryData<AssistantStatus>(key, (old) => (old?.conversation ? { ...old, conversation: { ...old.conversation, model } } : old))
+  }
+  const chatModels: ChatModels = {
+    model: conversation.model,
+    models: status.data.models,
+    onPick: (model) => {
+      if (model === conversation.model) return
+      setChatModel(workspace.id, conversation.id, model)
+        .then((picked) => {
+          setModel(picked.model)
+          client.setQueryData<AssistantStatus>(key, (old) => (old ? { ...old, models: picked.models } : old))
+          toast.success(`This chat now uses ${modelName(picked.model)}`)
+        })
+        .catch((error: unknown) => {
+          toast.error(error instanceof Error ? error.message : 'The model could not be changed.')
+          void status.refetch()
+        })
+    },
+  }
   return (
     <>
       {/* the chat stays mounted under the history, so a run that works keeps streaming */}
@@ -167,6 +190,12 @@ export default function AssistantPanel({ onClose }: { onClose: () => void }) {
           key={conversation.id}
           workspaceId={workspace.id}
           conversation={conversation}
+          chatModels={chatModels}
+          onModelFallback={(model, previous) => {
+            setModel(model)
+            void status.refetch()
+            toast.info(`${modelName(previous)} is no longer allowed in this workspace, so this chat now uses ${modelName(model)}.`)
+          }}
           onClose={onClose}
           onNewChat={() => void newChat()}
           onHistory={() => setView({ kind: 'history' })}
@@ -281,9 +310,12 @@ function EarlierConversation({ workspaceId, id, onClose, onBack, onContinue, onA
 
 type Earlier = { onBack: () => void; onContinue: () => Promise<void>; error: string | null }
 
-function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, onHistory, onGone, earlier }: {
+function ConversationRuntime({ workspaceId, conversation, chatModels, onModelFallback, onClose, onNewChat, onHistory, onGone, earlier }: {
   workspaceId: string
   conversation: AssistantConversation
+  /** The live chat's model and the allowed ones (none for an earlier, read-only conversation). */
+  chatModels?: ChatModels
+  onModelFallback?: (model: string, previous: string) => void
   onClose: () => void
   onNewChat: () => void
   onHistory?: () => void
@@ -295,6 +327,22 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
   // the mentions of the message being sent (kinds and ids): the server reads each item again with the member's access
   const mentions = useRef('[]')
   const agent = useMemo(() => new HttpAgent({ url: `${assistantBase(workspaceId)}/run`, threadId: conversation.id }), [workspaceId, conversation.id])
+  // the server says once when an admin took this chat's model off the list
+  const fallback = useRef(onModelFallback)
+  useEffect(() => {
+    fallback.current = onModelFallback
+  })
+  useEffect(() => {
+    if (earlier) return
+    const subscription = agent.subscribe({
+      onCustomEvent: ({ event }) => {
+        if (event.name !== 'orbit.model_fallback') return
+        const value = event.value as { model?: unknown; previous?: unknown } | null
+        if (typeof value?.model === 'string' && typeof value.previous === 'string') fallback.current?.(value.model, value.previous)
+      },
+    })
+    return () => subscription.unsubscribe()
+  }, [agent, earlier])
   // The server owns the conversation: the panel reads it once and never writes it back.
   const history = useMemo<ThreadHistoryAdapter>(
     () => ({
@@ -333,6 +381,7 @@ function ConversationRuntime({ workspaceId, conversation, onClose, onNewChat, on
         {/* an earlier chat of the history is read-only: no Undo there */}
         <UndoContext value={earlier ? null : undo}>
         <Thread
+          chatModels={earlier ? undefined : chatModels}
           onClose={onClose}
           onNewChat={onNewChat}
           onHistory={onHistory}
@@ -384,7 +433,8 @@ function isWaiting(approval: { approved?: boolean; resolution?: string } | undef
   return !!approval && approval.approved === undefined && !approval.resolution
 }
 
-function Thread({ onClose, onNewChat, onHistory, earlier, setMentions: setRunMentions, runError, clearError, onStop }: {
+function Thread({ chatModels, onClose, onNewChat, onHistory, earlier, setMentions: setRunMentions, runError, clearError, onStop }: {
+  chatModels?: ChatModels
   onClose: () => void
   onNewChat: () => void
   onHistory?: () => void
@@ -484,6 +534,7 @@ function Thread({ onClose, onNewChat, onHistory, earlier, setMentions: setRunMen
 
   const tools = earlier ? null : (
     <>
+      {chatModels ? <ChatModelPicker chatModels={chatModels} disabled={running} /> : null}
       <Tip label={follow ? 'Follow along is on: the page goes where Ask AI works' : 'Follow along is off: Ask AI shows a link instead'}>
         <Button variant="ghost" size="icon-sm" aria-label="Follow along" aria-pressed={follow} className={cn(follow ? 'text-foreground' : 'text-muted-foreground')} onClick={() => assistantUi.setFollow(!follow)}>
           {follow ? <Eye /> : <EyeSlash />}
@@ -622,6 +673,7 @@ function Thread({ onClose, onNewChat, onHistory, earlier, setMentions: setRunMen
               }}
               onNewChat={onNewChat}
               newChatDisabled={running}
+              chatModels={chatModels && running ? { ...chatModels, onPick: () => toast.info('The model can change when Ask AI is done.') } : chatModels}
               footer={<p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>}
             />
           )}

@@ -10,6 +10,8 @@ export type AiSettings = {
   provider: 'anthropic'
   model: string
   models: string[]
+  /** The models members may pick per chat: the workspace's model first, then the ones an admin allowed. */
+  allowedModels: string[]
   key: { set: boolean; last4: string | null; source: 'workspace' | 'server' | null }
   appKey: boolean
   usage: { today: UsageView; last30Days: UsageView }
@@ -20,7 +22,7 @@ export type AiSettings = {
 
 export type KeyTest = { ok: true; available: string[]; models: string[] } | { ok: false; error: string }
 
-export type AiSettingsBody = { model: string; apiKey?: string; dailyTokenCap?: number }
+export type AiSettingsBody = { model: string; apiKey?: string; dailyTokenCap?: number; allowedModels?: string[] }
 
 const base = '/api/v1/assistant/workspaces/{workspace_id}'
 
@@ -47,6 +49,18 @@ export const MODEL_LABELS: Record<string, string> = {
   'claude-sonnet-5-5': 'Claude Sonnet 5.5 (recommended)',
   'claude-opus-5-5': 'Claude Opus 5.5 (most capable, about twice the price)',
   'claude-haiku-5-5': 'Claude Haiku 5.5 (fastest and cheapest)',
+}
+
+/** The short name of a model ("Sonnet 5.5"), as the web's chat model menu shows it. */
+export const MODEL_NAMES: Record<string, string> = {
+  'claude-sonnet-5-5': 'Sonnet 5.5',
+  'claude-opus-5-5': 'Opus 5.5',
+  'claude-haiku-5-5': 'Haiku 5.5',
+}
+
+/** The other models members may pick per chat, to save: the workspace's model is always allowed, so it is left out. */
+export function chatModelsToSave(allowed: string[], model: string): string[] {
+  return allowed.filter((other, index) => other !== model && allowed.indexOf(other) === index)
 }
 
 /** The server's own message (it never contains the key), or the fallback. */

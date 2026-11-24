@@ -1143,6 +1143,7 @@ async fn only_admins_save_the_key_and_it_is_stored_sealed() {
                 "claude-sonnet-5-5",
                 Some(Some(sealed.clone())),
                 None,
+                None,
                 now
             )
             .await,
@@ -1150,7 +1151,7 @@ async fn only_admins_save_the_key_and_it_is_stored_sealed() {
     ));
     assert!(matches!(
         repository
-            .save(w.workspace, w.owner, "gpt-5", None, None, now)
+            .save(w.workspace, w.owner, "gpt-5", None, None, None, now)
             .await,
         Err(SettingsError::UnknownModel)
     ));
@@ -1160,6 +1161,7 @@ async fn only_admins_save_the_key_and_it_is_stored_sealed() {
             w.owner,
             "claude-opus-5-5",
             Some(Some(sealed)),
+            None,
             None,
             now,
         )
@@ -1189,6 +1191,7 @@ async fn only_admins_save_the_key_and_it_is_stored_sealed() {
             w.owner,
             "claude-opus-5-5",
             Some(None),
+            None,
             None,
             now,
         )
@@ -1686,6 +1689,7 @@ async fn the_daily_token_cap_and_a_broken_database_close_the_gate() {
             "claude-sonnet-5-5",
             None,
             Some(1_000),
+            None,
             now,
         )
         .await
@@ -1698,6 +1702,7 @@ async fn the_daily_token_cap_and_a_broken_database_close_the_gate() {
                 "claude-sonnet-5-5",
                 None,
                 Some(0),
+                None,
                 now
             )
             .await,
@@ -2071,6 +2076,7 @@ async fn with_the_server_key_the_limit_stays_under_the_server_maximum() {
                 "claude-sonnet-5-5",
                 None,
                 Some(5_000),
+                None,
                 now
             )
             .await,
@@ -2083,6 +2089,7 @@ async fn with_the_server_key_the_limit_stays_under_the_server_maximum() {
             "claude-sonnet-5-5",
             None,
             Some(800),
+            None,
             now,
         )
         .await
@@ -2118,6 +2125,7 @@ async fn with_the_server_key_the_limit_stays_under_the_server_maximum() {
             "claude-sonnet-5-5",
             Some(Some(sealed)),
             Some(5_000),
+            None,
             now,
         )
         .await
@@ -3057,6 +3065,416 @@ async fn task_counts_match_paging_through_the_same_filter() {
         sums[0] - 2,
         "the restricted token does not count Fourth"
     );
+}
+
+// ---- the model per chat ----
+
+#[test]
+fn a_chat_uses_its_pick_only_while_the_workspace_allows_it() {
+    let mut settings = settings::AiSettings {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-5-5".into(),
+        key: None,
+        daily_token_cap: None,
+        allowed_models: Vec::new(),
+    };
+    // nothing allowed beyond the workspace's model: nothing changes for existing workspaces
+    assert_eq!(settings::chat_models(None), vec!["claude-sonnet-5-5"]);
+    assert_eq!(
+        settings::chat_models(Some(&settings)),
+        vec!["claude-sonnet-5-5"]
+    );
+    assert_eq!(
+        settings::run_model(Some(&settings), None),
+        ("claude-sonnet-5-5".to_owned(), None)
+    );
+    settings.allowed_models = vec!["claude-haiku-5-5".into(), "claude-opus-5-5".into()];
+    // the workspace's model first, then the others in the offered order
+    assert_eq!(
+        settings::chat_models(Some(&settings)),
+        vec!["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+    );
+    assert_eq!(
+        settings::run_model(Some(&settings), Some("claude-opus-5-5")),
+        ("claude-opus-5-5".to_owned(), None)
+    );
+    // taken off the list (or never on it): the workspace's model, and the dropped pick to report
+    settings.allowed_models = vec!["claude-haiku-5-5".into()];
+    assert_eq!(
+        settings::run_model(Some(&settings), Some("claude-opus-5-5")),
+        (
+            "claude-sonnet-5-5".to_owned(),
+            Some("claude-opus-5-5".to_owned())
+        )
+    );
+    assert_eq!(
+        settings::run_model(Some(&settings), Some("gpt-5")),
+        ("claude-sonnet-5-5".to_owned(), Some("gpt-5".to_owned()))
+    );
+}
+
+struct ChatModelApp {
+    w: Workspace,
+    app: Router,
+    owner: String,
+    member: String,
+}
+
+async fn chat_model_app(base_url: Option<String>) -> ChatModelApp {
+    use crate::auth_routes::CookieMode;
+    use crate::mcp::TaskTools;
+    use crate::repositories::identity::IdentityRepository;
+    use crate::repositories::tasks::TaskRepository;
+    use crate::token_api::TokenApi;
+    use orbit_platform::AuthenticatedUser;
+    let w = workspace().await;
+    let identity = Arc::new(IdentityRepository::new((*w.database).clone()));
+    let now = TimestampMillis::now();
+    let mut cookies = Vec::new();
+    for (id, email) in [
+        (w.owner, "owner@example.com"),
+        (w.member, "member@example.com"),
+    ] {
+        let user = AuthenticatedUser {
+            id,
+            email: email.into(),
+            display_name: "Someone".into(),
+        };
+        let session = identity.create_session(&user, now).await.unwrap();
+        cookies.push(format!("__Host-orbit_session={}", session.token));
+    }
+    let tools = TaskTools::in_process(
+        TokenApi::new(Arc::new(TaskRepository::new((*w.database).clone()))),
+        super::REQUEST_ID,
+    );
+    let mut state = super::AssistantState::new(
+        identity,
+        CookieMode::secure(),
+        tools,
+        Some([9_u8; 32]),
+        orbit_platform::EnvironmentMode::Production,
+    );
+    if let Some(base_url) = base_url {
+        state.base_url = base_url;
+        state.server_key = Some("sk-ant-good-key-000000".into());
+    }
+    let member = cookies.pop().unwrap();
+    let owner = cookies.pop().unwrap();
+    ChatModelApp {
+        w,
+        app: super::router(state),
+        owner,
+        member,
+    }
+}
+
+async fn call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    body: Option<Value>,
+) -> (StatusCode, String) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie);
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn only_admins_set_the_chat_models_and_a_chat_picks_only_an_allowed_one() {
+    let t = chat_model_app(None).await;
+    let base = format!("/api/v1/assistant/workspaces/{}", t.w.workspace);
+    let allow = json!({"model": "claude-sonnet-5-5", "allowedModels": ["claude-opus-5-5"]});
+    // a member cannot change the list
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/settings"),
+        &t.member,
+        Some(allow.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // an unknown model in the list is refused
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/settings"),
+        &t.owner,
+        Some(json!({"model": "claude-sonnet-5-5", "allowedModels": ["gpt-5"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // by default a chat has only the workspace's model
+    let (_, body) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/conversations"),
+        &t.member,
+        None,
+    )
+    .await;
+    let conversation: Value = serde_json::from_str(&body).unwrap();
+    let id = conversation["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(conversation["conversation"]["model"], "claude-sonnet-5-5");
+    let pick = format!("{base}/conversations/{id}/model");
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &pick,
+        &t.member,
+        Some(json!({"model": "claude-opus-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // the owner allows Opus
+    let (status, body) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/settings"),
+        &t.owner,
+        Some(allow),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        view["allowedModels"],
+        json!(["claude-sonnet-5-5", "claude-opus-5-5"])
+    );
+    let (status, body) = call(
+        &t.app,
+        "PUT",
+        &pick,
+        &t.member,
+        Some(json!({"model": "claude-opus-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = call(
+        &t.app,
+        "GET",
+        &format!("{base}/conversation"),
+        &t.member,
+        None,
+    )
+    .await;
+    let current: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(current["conversation"]["model"], "claude-opus-5-5");
+    assert_eq!(
+        current["models"],
+        json!(["claude-sonnet-5-5", "claude-opus-5-5"])
+    );
+    // a tampered name, a model not on the list, another user's chat: refused, the pick stays
+    for (cookie, model) in [
+        (&t.member, json!("claude-opus-5-5 ")),
+        (&t.member, json!("claude-haiku-5-5")),
+        (&t.member, json!({"id": "claude-opus-5-5"})),
+    ] {
+        let (status, _) = call(&t.app, "PUT", &pick, cookie, Some(json!({"model": model}))).await;
+        assert!(status.is_client_error(), "{model}: {status}");
+    }
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &pick,
+        &t.owner,
+        Some(json!({"model": "claude-sonnet-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT model FROM assistant_conversations WHERE id = $1")
+            .bind(&id)
+            .fetch_one(t.w.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some("claude-opus-5-5"));
+    // the workspace's own model is stored as no pick
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &pick,
+        &t.member,
+        Some(json!({"model": "claude-sonnet-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT model FROM assistant_conversations WHERE id = $1")
+            .bind(&id)
+            .fetch_one(t.w.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, None);
+}
+
+#[tokio::test]
+async fn a_run_checks_the_chat_model_again_and_falls_back_once() {
+    let (url, fake) = fake_server(vec![text("one"), text("two"), text("three")]).await;
+    let t = chat_model_app(Some(url)).await;
+    let base = format!("/api/v1/assistant/workspaces/{}", t.w.workspace);
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/settings"),
+        &t.owner,
+        Some(json!({"model": "claude-sonnet-5-5", "allowedModels": ["claude-opus-5-5"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/conversations"),
+        &t.member,
+        None,
+    )
+    .await;
+    let conversation: Value = serde_json::from_str(&body).unwrap();
+    let id = conversation["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/conversations/{id}/model"),
+        &t.member,
+        Some(json!({"model": "claude-opus-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let run = |n: u32| json!({"threadId": id, "runId": format!("run-{n}"), "messages": [{"id": format!("u{n}"), "role": "user", "content": "hello"}]});
+    // a run uses the chat's pick
+    let (_, events) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/run"),
+        &t.member,
+        Some(run(1)),
+    )
+    .await;
+    assert!(!events.contains("orbit.model_fallback"), "{events}");
+    wait_for_release(&t.w, &id).await;
+    // a new chat archives this one: its pick stays with it and cannot change while it is history
+    let (status, body) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/conversations"),
+        &t.member,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fresh: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(fresh["conversation"]["model"], "claude-sonnet-5-5");
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/conversations/{id}/model"),
+        &t.member,
+        Some(json!({"model": "claude-sonnet-5-5"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // continued, it keeps Opus
+    let (status, body) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/conversations/{id}/continue"),
+        &t.member,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let continued: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(continued["conversation"]["model"], "claude-opus-5-5");
+    // the owner takes Opus off the list: the next run uses the workspace's model and says so, once
+    let (status, _) = call(
+        &t.app,
+        "PUT",
+        &format!("{base}/settings"),
+        &t.owner,
+        Some(json!({"model": "claude-sonnet-5-5", "allowedModels": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, events) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/run"),
+        &t.member,
+        Some(run(2)),
+    )
+    .await;
+    assert!(events.contains("orbit.model_fallback"), "{events}");
+    assert!(
+        events.contains(r#""previous":"claude-opus-5-5""#),
+        "{events}"
+    );
+    wait_for_release(&t.w, &id).await;
+    let (_, events) = call(
+        &t.app,
+        "POST",
+        &format!("{base}/run"),
+        &t.member,
+        Some(run(3)),
+    )
+    .await;
+    assert!(!events.contains("orbit.model_fallback"), "{events}");
+    let models: Vec<Value> = fake
+        .requests()
+        .iter()
+        .map(|request| request["model"].clone())
+        .collect();
+    assert_eq!(
+        models,
+        vec![
+            json!("claude-opus-5-5"),
+            json!("claude-sonnet-5-5"),
+            json!("claude-sonnet-5-5")
+        ]
+    );
+}
+
+/// The run saves (and lets go of the conversation) right after its response ends.
+async fn wait_for_release(w: &Workspace, id: &str) {
+    for _ in 0..100 {
+        let until: Option<i64> =
+            sqlx::query_scalar("SELECT run_until FROM assistant_conversations WHERE id = $1")
+                .bind(id)
+                .fetch_one(w.database.pool())
+                .await
+                .unwrap();
+        if until.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the run did not let go of the conversation");
 }
 
 // ---- the history ----
@@ -4036,7 +4454,7 @@ async fn continuing_the_open_chat_also_starts_it_afresh() {
         .await
         .unwrap()
         .unwrap();
-    let view = super::conversation_view(&open, now);
+    let view = super::conversation_view(&open, None, now);
     assert!(view.to_string().contains("interrupts"));
     let Switch::Done(resumed) = store
         .resume(conversation.id, w.workspace, w.owner, at(now, 1_000))
@@ -4049,7 +4467,7 @@ async fn continuing_the_open_chat_also_starts_it_afresh() {
     assert!(resumed.state.pending.is_none());
     assert!(resumed.state.allowed_tools.is_empty());
     assert!(
-        !super::conversation_view(&resumed, now)
+        !super::conversation_view(&resumed, None, now)
             .to_string()
             .contains("interrupts")
     );
@@ -4099,7 +4517,7 @@ async fn an_archived_conversation_never_shows_an_approval_card() {
         .unwrap();
     assert!(archived.state.pending.is_some());
     assert!(
-        !super::conversation_view(&archived, now)
+        !super::conversation_view(&archived, None, now)
             .to_string()
             .contains("interrupts")
     );
@@ -5451,7 +5869,7 @@ async fn undo_works_for_the_owner_of_the_conversation_only_and_never_twice() {
         .await
         .unwrap()
         .unwrap();
-    let view = super::conversation_view(&saved, TimestampMillis::now());
+    let view = super::conversation_view(&saved, None, TimestampMillis::now());
     let shown = view.to_string();
     assert!(shown.contains(r#"\"state\":\"undone\""#));
     assert!(shown.contains(r#"\"state\":\"conflict\""#));

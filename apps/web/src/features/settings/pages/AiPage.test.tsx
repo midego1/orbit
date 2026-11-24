@@ -17,6 +17,7 @@ const settings = (last4: string | null) => ({
   provider: 'anthropic',
   model: 'claude-sonnet-5-5',
   models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'],
+  allowedModels: ['claude-sonnet-5-5'],
   key: { set: last4 !== null, last4, source: last4 ? 'workspace' : null },
   appKey: true,
   usage: { today: usage, last30Days: usage },
@@ -53,7 +54,7 @@ test('an admin saves a key; the page shows only its last four characters', async
   expect((await view.findByTestId('ai-key-state')).textContent).toContain('No key is set')
   await userEvent.type(view.getByLabelText(/^API key/), 'sk-ant-api03-abcdefghijklmnop-wxyz')
   await userEvent.click(view.getByRole('button', { name: 'Save' }))
-  await waitFor(() => expect(sent).toEqual([{ model: 'claude-sonnet-5-5', dailyTokenCap: 2_000_000, apiKey: 'sk-ant-api03-abcdefghijklmnop-wxyz' }]))
+  await waitFor(() => expect(sent).toEqual([{ model: 'claude-sonnet-5-5', dailyTokenCap: 2_000_000, allowedModels: [], apiKey: 'sk-ant-api03-abcdefghijklmnop-wxyz' }]))
   expect(view.getByTestId('ai-cap-used').textContent).toContain("Counted toward today's limit: 1,050 (cache reads count 10%)")
   await waitFor(() => expect(view.getByTestId('ai-key-state').textContent).toContain('…wxyz'))
   expect(view.queryByDisplayValue(/sk-ant/)).toBeNull()
@@ -87,4 +88,30 @@ test('a member cannot open the settings', async () => {
   const view = renderPage('member')
   expect(await view.findByText(/Only workspace owners and admins/)).toBeTruthy()
   expect(requested).toBe(false)
+})
+
+test('an admin picks the models members may use per chat; the workspace model is always on', async () => {
+  const sent: { allowedModels?: string[] }[] = []
+  let allowed = ['claude-sonnet-5-5']
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'PUT') {
+      const body = JSON.parse(String(init.body)) as { allowedModels?: string[] }
+      sent.push(body)
+      allowed = ['claude-sonnet-5-5', ...(body.allowedModels ?? [])]
+    }
+    return Response.json({ ...settings(null), allowedModels: allowed })
+  }) as typeof fetch
+  const view = renderPage()
+  const group = await view.findByTestId('ai-chat-models')
+  const boxes = () => Array.from(group.querySelectorAll('[role="checkbox"]'))
+  expect(group.textContent).toContain('Sonnet 5.5')
+  expect(group.textContent).toContain('Opus 5.5')
+  expect(group.textContent).toContain('Haiku 5.5')
+  // the workspace's own model is checked and cannot be unchecked; the others are off by default
+  expect(boxes().map((box) => box.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false'])
+  expect(boxes()[0]!.hasAttribute('data-disabled') || boxes()[0]!.getAttribute('aria-disabled') === 'true').toBe(true)
+  await userEvent.click(boxes()[1]!)
+  await userEvent.click(view.getByRole('button', { name: 'Save' }))
+  await waitFor(() => expect(sent.at(-1)?.allowedModels).toEqual(['claude-opus-5-5']))
+  await waitFor(() => expect(boxes().map((box) => box.getAttribute('aria-checked'))).toEqual(['true', 'true', 'false']))
 })

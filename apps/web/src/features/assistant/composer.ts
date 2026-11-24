@@ -90,7 +90,7 @@ export interface SlashCommand {
   /** What the menu row says. */
   label: string
   /** The prompt the command writes, or an action of the panel. */
-  run: { prompt: (path: string) => string } | { action: 'new_chat' }
+  run: { prompt: (path: string) => string } | { action: 'new_chat' } | { action: 'model' }
 }
 
 const THIS_PAGE: Record<PageKind, string> = {
@@ -116,6 +116,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     label: 'What changed since yesterday',
     run: { prompt: () => 'Write my standup: what changed in my tasks since yesterday, what I work on next, and what is blocked.' },
   },
+  { name: 'model', label: 'Pick the model of this chat', run: { action: 'model' } },
   { name: 'new', label: 'Start a new chat', run: { action: 'new_chat' } },
 ]
 
@@ -126,8 +127,22 @@ export function slashQuery(draft: string, cursor: number): string | null {
   return match[1]!.toLowerCase()
 }
 
-export function matchingCommands(query: string): SlashCommand[] {
-  return SLASH_COMMANDS.filter((command) => command.name.startsWith(query))
+/** `/model` shows only when the workspace allows more than one model for a chat. */
+export function matchingCommands(query: string, canPickModel = false): SlashCommand[] {
+  return SLASH_COMMANDS.filter((command) => command.name.startsWith(query) && (canPickModel || command.name !== 'model'))
+}
+
+/** The model being looked for after "/model ": the words typed so far, with the cursor at the end. Null otherwise. */
+export function modelQuery(draft: string, cursor: number): string | null {
+  const match = /^\/model\s+([\w .-]*)$/i.exec(draft)
+  if (!match || cursor !== draft.length) return null
+  return match[1]!.trim().toLowerCase()
+}
+
+/** The allowed models whose id or name has every typed word ("opus", "haiku 5"). */
+export function matchingModels(models: { id: string; name: string }[], query: string): { id: string; name: string }[] {
+  const words = query.split(/\s+/).filter(Boolean)
+  return models.filter((model) => words.every((word) => model.id.toLowerCase().includes(word) || model.name.toLowerCase().includes(word)))
 }
 
 /** The prompt a command writes. Text after the command ("/summarize in Dutch") is added to it. */
@@ -138,10 +153,10 @@ export function commandPrompt(command: SlashCommand, path: string, rest = ''): s
 }
 
 /** A sent "/command …": the command and the text after it. Unknown commands are sent as plain text. */
-export function parseSlash(text: string): { command: SlashCommand; rest: string } | null {
+export function parseSlash(text: string, canPickModel = false): { command: SlashCommand; rest: string } | null {
   const match = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text.trim())
   if (!match) return null
-  const command = SLASH_COMMANDS.find((candidate) => candidate.name === match[1]!.toLowerCase())
+  const command = matchingCommands(match[1]!.toLowerCase(), canPickModel).find((candidate) => candidate.name === match[1]!.toLowerCase())
   return command ? { command, rest: match[2] ?? '' } : null
 }
 

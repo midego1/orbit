@@ -9,11 +9,23 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub(crate) struct Emitter {
     out: mpsc::Sender<Value>,
+    /// A `CUSTOM` event sent right after `RUN_STARTED` (AG-UI wants that event first).
+    after_start: Option<Value>,
 }
 
 impl Emitter {
     pub(crate) fn new(out: mpsc::Sender<Value>) -> Self {
-        Self { out }
+        Self {
+            out,
+            after_start: None,
+        }
+    }
+
+    /// Sends `CUSTOM` event `name` with `value` right after the run starts.
+    #[must_use]
+    pub(crate) fn with_notice(mut self, name: &str, value: Value) -> Self {
+        self.after_start = Some(json!({"type": "CUSTOM", "name": name, "value": value}));
+        self
     }
 
     pub(crate) async fn emit(&self, event: Value) {
@@ -23,6 +35,9 @@ impl Emitter {
     pub(crate) async fn run_started(&self, thread_id: &str, run_id: &str) {
         self.emit(json!({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}))
             .await;
+        if let Some(event) = &self.after_start {
+            self.emit(event.clone()).await;
+        }
     }
 
     pub(crate) async fn run_finished(&self, thread_id: &str, run_id: &str, outcome: Option<Value>) {

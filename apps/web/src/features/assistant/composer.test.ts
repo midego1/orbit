@@ -6,6 +6,8 @@ import {
   insertMention,
   isOpenPrompt,
   matchingCommands,
+  matchingModels,
+  modelQuery,
   MAX_MENTIONS,
   mentionLabel,
   mentionQuery,
@@ -67,8 +69,8 @@ test('the slash menu opens for "/" and letters at the end of the draft only', ()
   expect(matchingCommands('').map((command) => command.name)).toEqual(['summarize', 'plan', 'standup', 'new'])
   expect(matchingCommands('s').map((command) => command.name)).toEqual(['summarize', 'standup'])
   expect(matchingCommands('x')).toEqual([])
-  // no /model: the workspace's model is an admin setting
-  expect(SLASH_COMMANDS.some((command) => command.name === 'model')).toBe(false)
+  // no /model unless an admin allowed more than one model for a chat
+  expect(matchingCommands('model')).toEqual([])
 })
 
 test('commands write a clear prompt for the page; /new is an action', () => {
@@ -150,4 +152,22 @@ test('a shorter label inside a longer mention is neither sent nor shown as a chi
   ]
   expect(mentionsToSend('only @ENG-12 here', mentions).map((mention) => mention.id)).toEqual(['t12'])
   expect(mentionSegments('only @ENG-12 here', [{ kind: 'task', token: 'ENG-1' }])).toEqual([{ text: 'only @ENG-12 here' }])
+})
+
+test('/model is a command only with a choice of models; "/model …" filters the allowed models', () => {
+  expect(matchingCommands('m').map((command) => command.name)).toEqual([])
+  expect(matchingCommands('m', true).map((command) => command.name)).toEqual(['model'])
+  expect(parseSlash('/model opus')).toBeNull()
+  expect(parseSlash('/model opus', true)?.rest).toBe('opus')
+  expect(modelQuery('/model ', 7)).toBe('')
+  expect(modelQuery('/model Haiku 5', 14)).toBe('haiku 5')
+  expect(modelQuery('/model haiku', 3)).toBeNull()
+  expect(modelQuery('/modelx', 7)).toBeNull()
+  const models = [
+    { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5' },
+    { id: 'claude-haiku-5-5', name: 'Haiku 5.5' },
+  ]
+  expect(matchingModels(models, 'haiku 5').map((model) => model.id)).toEqual(['claude-haiku-5-5'])
+  expect(matchingModels(models, '').length).toBe(2)
+  expect(matchingModels(models, 'opus')).toEqual([])
 })
