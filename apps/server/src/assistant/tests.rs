@@ -1029,20 +1029,32 @@ async fn through_a_gateway_the_requests_carry_its_headers_and_no_fallbacks() {
         headers: vec![("x-magic-feature".into(), "ai-agent-chat".into())],
         user_header: Some("x-magic-user".into()),
     };
-    let provider = AnthropicProvider::new(reqwest::Client::new(), &base, "sk-gateway-key-000000".into())
-        .with_gateway(Some(gateway.for_user(Some("member-1"))));
+    let provider = AnthropicProvider::new(
+        reqwest::Client::new(),
+        &base,
+        "sk-gateway-key-000000".into(),
+    )
+    .with_gateway(Some(gateway.for_user(Some("member-1"))));
     let (deltas, _receiver) = mpsc::unbounded_channel();
     let request = super::model::ModelRequest {
         model: "claude-sonnet-5-5".into(),
         system: "s".into(),
-        messages: vec![super::model::Message::user(vec![Block::Text { text: "hi".into() }])],
+        messages: vec![super::model::Message::user(vec![Block::Text {
+            text: "hi".into(),
+        }])],
         tools: vec![],
         max_tokens: 100,
     };
-    provider.turn(&request, deltas, CancellationToken::new()).await.unwrap();
+    provider
+        .turn(&request, deltas, CancellationToken::new())
+        .await
+        .unwrap();
     let headers = fake.headers.lock().unwrap()[0].clone();
     assert_eq!(headers["x-magic-feature"], "ai-agent-chat");
-    assert_eq!(headers["x-magic-user"], super::anthropic::user_hash("member-1").as_str());
+    assert_eq!(
+        headers["x-magic-user"],
+        super::anthropic::user_hash("member-1").as_str()
+    );
     assert_eq!(headers["x-api-key"], "sk-gateway-key-000000");
     let body = &fake.requests()[0];
     assert!(body.get("fallbacks").is_none(), "{body}");
