@@ -4086,7 +4086,7 @@ async fn an_undo_after_24_hours_is_refused() {
         w.workspace,
         w.owner,
         conversation.id,
-        &[id.clone()],
+        std::slice::from_ref(&id),
     )
     .await
     .unwrap();

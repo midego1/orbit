@@ -311,7 +311,7 @@ pub(crate) async fn undo<T: ToolRunner, S: UndoSaver>(
             None => results.push(json!({"id": id, "outcome": "not_found", "message": "This change cannot be undone here."})),
         }
     }
-    positions.sort_by(|a, b| b.0.cmp(&a.0));
+    positions.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
     let mut chain: HashMap<String, (u64, u64)> = HashMap::new();
     let mut undone = Vec::new();
     let mut broken = false;
