@@ -666,7 +666,7 @@ function Thread({ chatModels, onClose, onNewChat, onHistory, earlier, setMention
               }}
               onNewChat={onNewChat}
               newChatDisabled={running}
-              chatModels={chatModels && running ? { ...chatModels, onPick: () => {} } : chatModels}
+              chatModels={chatModels && running ? { ...chatModels, onPick: () => toast.info('The model can change when Ask AI is done.') } : chatModels}
               footer={<p className="mt-1.5 text-center text-[0.6875rem] text-muted-foreground">Changes wait for your approval. Answers can be wrong.</p>}
             />
           )}

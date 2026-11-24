@@ -932,7 +932,6 @@ async fn run(
         Ok(settings) => settings,
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
     };
-    let (model, dropped) = settings::run_model(settings.as_ref(), conversation.model.as_deref());
     let api_key = match resolve_key(&state, member.workspace_id, settings.as_ref()) {
         KeyState::Ready(key) => key,
         KeyState::NoKey => {
@@ -1007,6 +1006,8 @@ async fn run(
         Ok(Some(fresh)) => fresh,
         _ => return problem(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "Try again."),
     };
+    // the chat's model as stored now (a pick made while this run waited for the lease counts), checked again
+    let (model, dropped) = settings::run_model(settings.as_ref(), conversation.model.as_deref());
     if conversation.state.nonce.is_empty() {
         conversation.state.nonce = prompt::new_nonce();
     }
