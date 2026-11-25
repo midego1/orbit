@@ -3500,7 +3500,7 @@ async fn chat_model_app(base_url: Option<String>) -> ChatModelApp {
         orbit_platform::EnvironmentMode::Production,
     );
     if let Some(base_url) = base_url {
-        state.base_url = base_url;
+        state.endpoint = super::Endpoint::Anthropic(base_url);
         state.server_key = Some("sk-ant-good-key-000000".into());
     }
     let member = cookies.pop().unwrap();
