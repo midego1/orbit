@@ -20,6 +20,7 @@ const settings = (last4: string | null) => ({
   allowedModels: ['claude-sonnet-5-5'],
   key: { set: last4 !== null, last4, source: last4 ? 'workspace' : null },
   appKey: true,
+  gateway: false,
   usage: { today: usage, last30Days: usage },
   dailyTokenCap: 2_000_000,
   maxDailyTokenCap: 1_000_000_000,

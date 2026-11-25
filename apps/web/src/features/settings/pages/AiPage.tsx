@@ -172,9 +172,9 @@ function KeyForm({ workspaceId, settings }: { workspaceId: string; settings: AiS
           <Field>
             <FieldLabel htmlFor="ai-key" className="items-center gap-1.5">
               {settings.key.source === 'workspace' ? 'Replace API key' : 'API key'}
-              <InfoTip text="Create a key in the Anthropic Console (console.anthropic.com → API keys). It starts with sk-ant-." />
+              <InfoTip text={settings.gateway ? 'This server sends Ask AI through a gateway: enter the key the gateway gave this workspace. It starts with sk-.' : 'Create a key in the Anthropic Console (console.anthropic.com → API keys). It starts with sk-ant-.'} />
             </FieldLabel>
-            <PasswordInput id="ai-key" autoComplete="off" spellCheck={false} placeholder="sk-ant-…" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+            <PasswordInput id="ai-key" autoComplete="off" spellCheck={false} placeholder={settings.gateway ? 'sk-…' : 'sk-ant-…'} value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
           </Field>
         </FieldGrid>
         {tested ? <p className="text-sm text-foreground" role="status" data-testid="ai-test-result">{tested}</p> : null}

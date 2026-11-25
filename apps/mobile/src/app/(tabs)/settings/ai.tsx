@@ -149,8 +149,8 @@ function KeyCard({ settings }: { settings: api.AiSettings }) {
         />
         <Input
           label={settings.key.source === 'workspace' ? 'Replace API key' : 'API key'}
-          help="Create a key in the Anthropic Console (console.anthropic.com → API keys). It starts with sk-ant-."
-          placeholder="sk-ant-…"
+          help={settings.gateway ? 'This server sends Ask AI through a gateway: enter the key the gateway gave this workspace. It starts with sk-.' : 'Create a key in the Anthropic Console (console.anthropic.com → API keys). It starts with sk-ant-.'}
+          placeholder={settings.gateway ? 'sk-…' : 'sk-ant-…'}
           autoCapitalize="none"
           autoCorrect={false}
           secureTextEntry

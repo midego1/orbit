@@ -85,7 +85,7 @@ pub struct AssistantState {
     registry: Arc<registry::Registry>,
     app_key: Option<[u8; 32]>,
     http: reqwest::Client,
-    base_url: String,
+    endpoint: Endpoint,
     /// `ORBIT_AI_ANTHROPIC_KEY`: the key of workspaces that have none of their own.
     server_key: Option<String>,
     limits: Limits,
@@ -95,8 +95,9 @@ pub struct AssistantState {
 
 impl AssistantState {
     /// `ORBIT_AI_ANTHROPIC_KEY` (optional) gives workspaces without a key of their own the
-    /// server's key. `ORBIT_DEV_AI_ANTHROPIC_BASE_URL` points at a stand-in for the Anthropic API,
-    /// in development only (end-to-end tests with a fake model).
+    /// server's key. `ORBIT_AI_ANTHROPIC_BASE_URL` (optional) sends the requests to an
+    /// Anthropic-compatible gateway instead (see [`Endpoint`]). `ORBIT_DEV_AI_ANTHROPIC_BASE_URL`
+    /// points at a stand-in for the Anthropic API, in development only (end-to-end tests with a fake model).
     pub(crate) fn new(
         identity: Arc<IdentityRepository>,
         cookie_mode: CookieMode,
@@ -105,10 +106,22 @@ impl AssistantState {
         environment: EnvironmentMode,
     ) -> Self {
         let database = identity.database().clone();
-        let base_url = std::env::var("ORBIT_DEV_AI_ANTHROPIC_BASE_URL")
-            .ok()
-            .filter(|url| environment == EnvironmentMode::Development && is_loopback_url(url))
-            .unwrap_or_else(|| anthropic::DEFAULT_BASE_URL.to_owned());
+        let endpoint = Endpoint::from_settings(
+            &EndpointSettings {
+                base_url: std::env::var("ORBIT_AI_ANTHROPIC_BASE_URL").ok(),
+                headers: std::env::var("ORBIT_AI_GATEWAY_HEADERS").ok(),
+                user_header: std::env::var("ORBIT_AI_GATEWAY_USER_HEADER").ok(),
+                dev_base_url: std::env::var("ORBIT_DEV_AI_ANTHROPIC_BASE_URL").ok(),
+            },
+            environment == EnvironmentMode::Development,
+        )
+        .unwrap_or_else(|reason| {
+            tracing::error!(
+                reason,
+                "Ask AI's gateway settings are not valid; Ask AI sends no model requests"
+            );
+            Endpoint::Invalid
+        });
         let server_key = std::env::var("ORBIT_AI_ANTHROPIC_KEY")
             .ok()
             .map(|key| key.trim().to_owned())
@@ -135,7 +148,7 @@ impl AssistantState {
                         .build()
                         .unwrap_or_default()
                 }),
-            base_url,
+            endpoint,
             server_key,
             limits: Limits::default(),
             runs: Arc::new(Mutex::new(HashMap::new())),
@@ -215,6 +228,286 @@ fn only_a_loopback_base_url_is_honoured() {
         "not a url",
     ] {
         assert!(!is_loopback_url(bad), "{bad}");
+    }
+}
+
+/// Where Ask AI's model requests go.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Endpoint {
+    /// Anthropic itself (or, in development, a stand-in on this machine).
+    Anthropic(String),
+    /// An Anthropic-compatible gateway (`ORBIT_AI_ANTHROPIC_BASE_URL`), such as LiteLLM: the workspace key (or the
+    /// server's key) is then the gateway's key.
+    Gateway {
+        base_url: String,
+        gateway: anthropic::Gateway,
+    },
+    /// The gateway settings are not valid: no model request goes out, rather than one that skips the gateway.
+    Invalid,
+}
+
+/// The environment variables [`Endpoint`] is built from.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EndpointSettings {
+    pub(crate) base_url: Option<String>,
+    pub(crate) headers: Option<String>,
+    pub(crate) user_header: Option<String>,
+    pub(crate) dev_base_url: Option<String>,
+}
+
+const MAX_GATEWAY_HEADERS: usize = 10;
+
+impl Endpoint {
+    /// `development`: the server runs with `ORBIT_ENV=development`, where a loopback `http` address is allowed too.
+    pub(crate) fn from_settings(
+        settings: &EndpointSettings,
+        development: bool,
+    ) -> Result<Self, &'static str> {
+        let set = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let base_url = set(&settings.base_url);
+        let headers = set(&settings.headers);
+        let user_header = set(&settings.user_header);
+        let Some(base_url) = base_url else {
+            if headers.is_some() || user_header.is_some() {
+                return Err("ORBIT_AI_GATEWAY_* is set without ORBIT_AI_ANTHROPIC_BASE_URL");
+            }
+            let dev = set(&settings.dev_base_url).filter(|url| development && is_loopback_url(url));
+            return Ok(Self::Anthropic(
+                dev.unwrap_or_else(|| anthropic::DEFAULT_BASE_URL.to_owned()),
+            ));
+        };
+        let base_url = gateway_base_url(&base_url, development).ok_or(
+            "ORBIT_AI_ANTHROPIC_BASE_URL must be an https address without user, query or fragment",
+        )?;
+        let headers = match headers {
+            Some(raw) => parse_gateway_headers(&raw)?,
+            None => Vec::new(),
+        };
+        let user_header = match user_header {
+            Some(name) => {
+                let name = name.to_ascii_lowercase();
+                if !valid_gateway_header_name(&name)
+                    || headers.iter().any(|(fixed, _)| *fixed == name)
+                {
+                    return Err(
+                        "ORBIT_AI_GATEWAY_USER_HEADER must be an x- header name not in ORBIT_AI_GATEWAY_HEADERS",
+                    );
+                }
+                Some(name)
+            }
+            None => None,
+        };
+        Ok(Self::Gateway {
+            base_url,
+            gateway: anthropic::Gateway {
+                headers,
+                user_header,
+            },
+        })
+    }
+
+    pub(crate) fn via_gateway(&self) -> bool {
+        matches!(self, Self::Gateway { .. })
+    }
+
+    /// The provider for one request (`user_id`: the member it runs for, if any), or `None` when the settings are not valid.
+    fn provider(
+        &self,
+        http: &reqwest::Client,
+        api_key: String,
+        user_id: Option<&str>,
+    ) -> Option<AnthropicProvider> {
+        match self {
+            Self::Anthropic(base_url) => {
+                Some(AnthropicProvider::new(http.clone(), base_url, api_key))
+            }
+            Self::Gateway { base_url, gateway } => Some(
+                AnthropicProvider::new(http.clone(), base_url, api_key)
+                    .with_gateway(Some(gateway.for_user(user_id))),
+            ),
+            Self::Invalid => None,
+        }
+    }
+}
+
+/// The gateway's address without a trailing `/` or `/v1` (the paths are added per request): `https`, or a loopback
+/// `http` address in development; never with user info, a query or a fragment.
+fn gateway_base_url(raw: &str, development: bool) -> Option<String> {
+    let url = url::Url::parse(raw).ok()?;
+    let allowed_scheme = url.scheme() == "https" || (development && is_loopback_url(raw));
+    if !allowed_scheme
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let text = url.as_str().trim_end_matches('/');
+    Some(text.strip_suffix("/v1").unwrap_or(text).to_owned())
+}
+
+/// `ORBIT_AI_GATEWAY_HEADERS`: `name=value` pairs separated by commas. Names start with `x-` (never `x-api-key`); values
+/// are visible ASCII without commas.
+fn parse_gateway_headers(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    const INVALID: &str =
+        "ORBIT_AI_GATEWAY_HEADERS must be name=value pairs of x- headers, separated by commas";
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for pair in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+    {
+        let (name, value) = pair.split_once('=').ok_or(INVALID)?;
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if !valid_gateway_header_name(&name)
+            || value.is_empty()
+            || !value.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+            || headers.iter().any(|(seen, _)| *seen == name)
+        {
+            return Err(INVALID);
+        }
+        headers.push((name, value.to_owned()));
+    }
+    if headers.len() > MAX_GATEWAY_HEADERS {
+        return Err("ORBIT_AI_GATEWAY_HEADERS has more than 10 headers");
+    }
+    Ok(headers)
+}
+
+/// An `x-` header name of letters, digits and dashes that Ask AI does not set itself.
+fn valid_gateway_header_name(name: &str) -> bool {
+    name.len() <= 64
+        && name.starts_with("x-")
+        && name.len() > 2
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name != "x-api-key"
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::{Endpoint, EndpointSettings, anthropic};
+
+    fn settings(base_url: &str, headers: &str, user_header: &str) -> EndpointSettings {
+        let some = |value: &str| (!value.is_empty()).then(|| value.to_owned());
+        EndpointSettings {
+            base_url: some(base_url),
+            headers: some(headers),
+            user_header: some(user_header),
+            dev_base_url: None,
+        }
+    }
+
+    #[test]
+    fn without_a_gateway_the_requests_go_to_anthropic() {
+        assert_eq!(
+            Endpoint::from_settings(&EndpointSettings::default(), false),
+            Ok(Endpoint::Anthropic(anthropic::DEFAULT_BASE_URL.to_owned()))
+        );
+        let dev = EndpointSettings {
+            dev_base_url: Some("http://127.0.0.1:18960".into()),
+            ..EndpointSettings::default()
+        };
+        assert_eq!(
+            Endpoint::from_settings(&dev, true),
+            Ok(Endpoint::Anthropic("http://127.0.0.1:18960".into()))
+        );
+        assert_eq!(
+            Endpoint::from_settings(&dev, false),
+            Ok(Endpoint::Anthropic(anthropic::DEFAULT_BASE_URL.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_gateway_takes_its_address_headers_and_user_header() {
+        let endpoint = Endpoint::from_settings(
+            &settings(
+                "https://ai.example.com/v1/",
+                "x-magic-feature=ai-agent-chat, X-Team=Sales Team",
+                "X-Magic-User",
+            ),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            endpoint,
+            Endpoint::Gateway {
+                base_url: "https://ai.example.com".into(),
+                gateway: anthropic::Gateway {
+                    headers: vec![
+                        ("x-magic-feature".into(), "ai-agent-chat".into()),
+                        ("x-team".into(), "Sales Team".into()),
+                    ],
+                    user_header: Some("x-magic-user".into()),
+                },
+            }
+        );
+        assert!(endpoint.via_gateway());
+        let path =
+            Endpoint::from_settings(&settings("https://ai.example.com/anthropic", "", ""), false);
+        assert!(
+            matches!(path, Ok(Endpoint::Gateway { ref base_url, .. }) if base_url == "https://ai.example.com/anthropic")
+        );
+    }
+
+    #[test]
+    fn a_loopback_http_gateway_is_allowed_in_development_only() {
+        let local = settings("http://127.0.0.1:4000", "", "");
+        assert!(Endpoint::from_settings(&local, true).unwrap().via_gateway());
+        assert!(Endpoint::from_settings(&local, false).is_err());
+    }
+
+    #[test]
+    fn gateway_settings_that_are_not_valid_are_refused() {
+        for (base, headers, user) in [
+            ("http://ai.example.com", "", ""),
+            ("https://user:pw@ai.example.com", "", ""),
+            ("https://ai.example.com/?key=1", "", ""),
+            ("https://ai.example.com#x", "", ""),
+            ("not a url", "", ""),
+            ("https://ai.example.com", "x-api-key=secret", ""),
+            ("https://ai.example.com", "authorization=Bearer x", ""),
+            ("https://ai.example.com", "x-feature", ""),
+            ("https://ai.example.com", "x-feature=", ""),
+            ("https://ai.example.com", "x-a=1,x-a=2", ""),
+            ("https://ai.example.com", "x-a=caf\u{e9}", ""),
+            ("https://ai.example.com", "x-a=line\nbreak", ""),
+            ("https://ai.example.com", "x-a=1", "x-a"),
+            ("https://ai.example.com", "", "x-api-key"),
+            ("https://ai.example.com", "", "user"),
+            ("", "x-a=1", ""),
+            ("", "", "x-magic-user"),
+        ] {
+            assert!(
+                Endpoint::from_settings(&settings(base, headers, user), false).is_err(),
+                "{base} | {headers} | {user}"
+            );
+        }
+        let many = (0..11)
+            .map(|i| format!("x-h{i}=v"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            Endpoint::from_settings(&settings("https://ai.example.com", &many, ""), false).is_err()
+        );
+    }
+
+    #[test]
+    fn the_user_hash_is_the_sha256_of_the_id() {
+        assert_eq!(
+            anthropic::user_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }
 
@@ -1282,6 +1575,10 @@ async fn run(
             );
         }
     };
+    let user = member.user_id.to_string();
+    let Some(provider) = state.endpoint.provider(&state.http, api_key, Some(&user)) else {
+        return notice(&thread_id, &run_id, Some(GATEWAY_INVALID), None);
+    };
     if matches!(request, Input::Message { .. })
         && serde_json::to_vec(&conversation.state).map_or(0, |bytes| bytes.len()) > MAX_STATE_BYTES
     {
@@ -1414,7 +1711,6 @@ async fn run(
             json!({"model": model, "previous": dropped}),
         );
     }
-    let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, api_key);
     tokio::spawn(async move {
         let tools = SessionTools {
             tools: state.tools.clone(),
@@ -1744,12 +2040,23 @@ struct TestBody {
     api_key: Option<String>,
 }
 
-fn valid_key(key: &str) -> bool {
-    key.starts_with("sk-ant-")
+const GATEWAY_INVALID: &str = "Ask AI's gateway settings on this server are not valid. The server's administrator can fix them (see the server log).";
+
+/// An Anthropic key (`sk-ant-…`), or through a gateway any `sk-…` key (a LiteLLM virtual key, for one).
+fn valid_key(key: &str, via_gateway: bool) -> bool {
+    (key.starts_with("sk-ant-") || (via_gateway && key.starts_with("sk-")))
         && (20..=400).contains(&key.len())
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+fn key_hint(state: &AssistantState) -> &'static str {
+    if state.endpoint.via_gateway() {
+        "That does not look like a gateway key (it starts with sk-)."
+    } else {
+        "That does not look like an Anthropic API key (it starts with sk-ant-)."
+    }
 }
 
 fn settings_problem(error: &SettingsError) -> Response {
@@ -1863,6 +2170,7 @@ async fn settings_view(state: &AssistantState, workspace_id: Id) -> Result<Value
             "source": if own.is_some() { Some("workspace") } else if state.server_key.is_some() { Some("server") } else { None },
         },
         "appKey": state.app_key.is_some(),
+        "gateway": state.endpoint.via_gateway(),
         "usage": {"today": usage_view(&today), "last30Days": usage_view(&month)},
         "dailyTokenCap": state.settings.effective_cap(settings.as_ref()),
         "maxDailyTokenCap": if own.is_some() {
@@ -1909,11 +2217,11 @@ async fn save_settings(
         .filter(|key| !key.is_empty())
     {
         None => None,
-        Some(key) if !valid_key(key) => {
+        Some(key) if !valid_key(key, state.endpoint.via_gateway()) => {
             return problem(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_key",
-                "That does not look like an Anthropic API key (it starts with sk-ant-).",
+                key_hint(&state),
             );
         }
         Some(key) => {
@@ -2001,8 +2309,8 @@ async fn test_key(
         .map(str::trim)
         .filter(|key| !key.is_empty())
     {
-        Some(key) if !valid_key(key) => {
-            return Json(json!({"ok": false, "error": "That does not look like an Anthropic API key (it starts with sk-ant-)."})).into_response();
+        Some(key) if !valid_key(key, state.endpoint.via_gateway()) => {
+            return Json(json!({"ok": false, "error": key_hint(&state)})).into_response();
         }
         Some(key) => key.to_owned(),
         None => {
@@ -2030,7 +2338,10 @@ async fn test_key(
         return Json(json!({"ok": false, "error": "Too many requests; wait a minute."}))
             .into_response();
     }
-    let provider = AnthropicProvider::new(state.http.clone(), &state.base_url, key);
+    let user = member.user_id.to_string();
+    let Some(provider) = state.endpoint.provider(&state.http, key, Some(&user)) else {
+        return Json(json!({"ok": false, "error": GATEWAY_INVALID})).into_response();
+    };
     match provider.models().await {
         Ok(models) => {
             let available: Vec<&str> = OFFERED_MODELS

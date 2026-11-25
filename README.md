@@ -37,6 +37,8 @@ Details: [docs/assistant.md](docs/assistant.md).
 - Optional: `ORBIT_AI_ANTHROPIC_KEY` gives Ask AI a server-wide key for workspaces without their own. Every such
   workspace then spends that key (within its daily token limit, at most `ORBIT_AI_MAX_DAILY_TOKENS`), so use it only on
   a single-tenant server, never on a shared or cloud one.
+- Optional: `ORBIT_AI_ANTHROPIC_BASE_URL` sends Ask AI through an Anthropic-compatible gateway (see
+  [docs/assistant.md](docs/assistant.md) for its headers).
 - As a workspace owner or admin, open **Settings → Integrations → AI**, paste your key from
   [console.anthropic.com](https://console.anthropic.com) (API keys), click **Test**, then **Save**. Pick a model
   (Claude Sonnet 5.5 by default) and a daily token limit. The mobile app has the same settings page; the chat panel

@@ -21,6 +21,16 @@ same tools as the MCP server (`docs/mcp.md`), in-process. The code is in `apps/s
   daily token limit is at most `ORBIT_AI_MAX_DAILY_TOKENS` (default 2,000,000); its admins cannot raise it.
 - `ORBIT_DEV_AI_ANTHROPIC_BASE_URL` points Ask AI at a stand-in for the Anthropic API (`scripts/assistant-fake-model.ts`).
   It is honoured only with `ORBIT_ENV=development` and an `http` loopback address (`127.0.0.1`, `::1`, `localhost`).
+- `ORBIT_AI_ANTHROPIC_BASE_URL` (optional) sends every Ask AI request to an Anthropic-compatible gateway (LiteLLM, for
+  one) instead of Anthropic. It must be an `https` address without user, query or fragment (a loopback `http` address
+  only with `ORBIT_ENV=development`); a trailing `/v1` is dropped. A workspace's key is then the key the gateway gave
+  it (`sk-…`), and the refusal fallbacks are not asked for (a gateway would read that field as its own setting).
+- `ORBIT_AI_GATEWAY_HEADERS` (optional, with the gateway only): fixed headers for every request, as `name=value` pairs
+  separated by commas, at most 10. Names start with `x-` (never `x-api-key`); values are visible ASCII without commas.
+- `ORBIT_AI_GATEWAY_USER_HEADER` (optional, with the gateway only): a header that carries the SHA-256 (hex) of the
+  member's id, so the gateway can count usage per person without learning who it is.
+- Gateway settings that are not valid stop Ask AI: no request goes out (the server logs why, and the chat and the
+  **Test** button say the settings are not valid), rather than one that skips the gateway.
 
 ## Using it
 

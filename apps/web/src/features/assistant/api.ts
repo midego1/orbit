@@ -69,6 +69,8 @@ export type AiSettings = {
   allowedModels: string[]
   key: { set: boolean; last4: string | null; source: 'workspace' | 'server' | null }
   appKey: boolean
+  /** The server sends Ask AI's requests through a gateway; the key is then the gateway's key. */
+  gateway: boolean
   usage: { today: UsageView; last30Days: UsageView }
   /** Tokens per UTC day for the whole workspace; cache reads count a tenth. */
   dailyTokenCap: number

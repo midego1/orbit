@@ -35,6 +35,45 @@ pub(crate) struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Set when the requests go to an Anthropic-compatible gateway instead of Anthropic itself.
+    gateway: Option<GatewayRequest>,
+}
+
+/// Where Ask AI's model requests go when a gateway (for example LiteLLM) sits in front of Anthropic:
+/// `ORBIT_AI_ANTHROPIC_BASE_URL`, plus the gateway's own headers. Built once at startup.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Gateway {
+    /// `ORBIT_AI_GATEWAY_HEADERS`: fixed headers sent with every request to the gateway.
+    pub(crate) headers: Vec<(String, String)>,
+    /// `ORBIT_AI_GATEWAY_USER_HEADER`: a header that carries the SHA-256 (hex) of the member's id,
+    /// so the gateway can tell members apart without learning who they are.
+    pub(crate) user_header: Option<String>,
+}
+
+/// The gateway headers of one member's requests.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GatewayRequest {
+    headers: Vec<(String, String)>,
+}
+
+impl Gateway {
+    /// The headers for `user_id`'s requests (`None`: the models list of the Test button, which has no member hash).
+    pub(crate) fn for_user(&self, user_id: Option<&str>) -> GatewayRequest {
+        let mut headers = self.headers.clone();
+        if let (Some(name), Some(user_id)) = (&self.user_header, user_id) {
+            headers.push((name.clone(), user_hash(user_id)));
+        }
+        GatewayRequest { headers }
+    }
+}
+
+/// The SHA-256 of a member's id, as 64 lower-case hex digits.
+pub(crate) fn user_hash(user_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(user_id.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -43,6 +82,7 @@ impl std::fmt::Debug for AnthropicProvider {
             .debug_struct("AnthropicProvider")
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
+            .field("gateway", &self.gateway.is_some())
             .finish()
     }
 }
@@ -53,14 +93,33 @@ impl AnthropicProvider {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
+            gateway: None,
         }
+    }
+
+    /// Sends the requests through a gateway: with its headers, and without Anthropic's server-side
+    /// refusal fallbacks (a gateway such as LiteLLM reads a `fallbacks` field as its own setting).
+    pub(crate) fn with_gateway(mut self, gateway: Option<GatewayRequest>) -> Self {
+        self.gateway = gateway;
+        self
+    }
+
+    fn gateway_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(gateway) = &self.gateway {
+            for (name, value) in &gateway.headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+        }
+        request
     }
 
     /// The models the key may use (`GET /v1/models`): a free request, so it doubles as the key test.
     pub(crate) async fn models(&self) -> Result<Vec<String>, ProviderError> {
         let response = self
-            .client
-            .get(format!("{}/v1/models?limit=100", self.base_url))
+            .gateway_headers(
+                self.client
+                    .get(format!("{}/v1/models?limit=100", self.base_url)),
+            )
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .timeout(Duration::from_secs(20))
@@ -97,8 +156,7 @@ impl AnthropicProvider {
         let mut attempt = 0;
         loop {
             let mut request = self
-                .client
-                .post(format!("{}/v1/messages", self.base_url))
+                .gateway_headers(self.client.post(format!("{}/v1/messages", self.base_url)))
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", API_VERSION)
                 .header("content-type", "application/json");
@@ -154,7 +212,7 @@ impl ModelProvider for AnthropicProvider {
         cancel: CancellationToken,
     ) -> Result<ModelTurn, ProviderError> {
         let body = request_body(request);
-        let fallbacks = supports_fallbacks(&request.model);
+        let fallbacks = self.gateway.is_none() && supports_fallbacks(&request.model);
         let response = match self.send(&body, fallbacks, &cancel).await {
             // An account without the fallback beta: the same request without it.
             Err(ProviderError::BadRequest(detail))
